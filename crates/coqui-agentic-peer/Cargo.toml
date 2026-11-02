@@ -1,0 +1,30 @@
+[package]
+name = "coqui-agentic-peer"
+description = "A proven link between two peers: pair once, then ACP, A2A, MCP or anything else over it"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["agent", "peer", "acp", "a2a", "mcp"]
+categories = ["network-programming"]
+exclude = [".*", "*.local.*"]
+# Nothing is published until the owner chooses a release.
+publish = false
+
+[dependencies]
+coqui-peer = { git = "https://github.com/Boriken-Dev/coqui-peer", rev = "1f00bfe6319f64e7ec038a7003746f4f031d538c" }
+coqui-peer-webcrypto = { git = "https://github.com/Boriken-Dev/coqui-peer-webcrypto", rev = "a3776fba131415d006f68ea493120fd7f894244a", features = ["pin"] }
+coqui-web = { git = "https://github.com/Boriken-Dev/coqui-web", rev = "4dc609e5c5f23ccbda993e3e126b8d13938648a6" }
+# Pure Rust, with no system mDNS service to depend on.
+mdns-sd = "0.21"
+serde_json = "1"
+url = "2.5"
+
+[dev-dependencies]
+proptest = "1"
+
+[lints]
+workspace = true

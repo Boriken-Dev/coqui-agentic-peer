@@ -1,0 +1,18 @@
+site_name: coqui-agentic-peer
+site_description: Pair once with a peer, then run any agent protocol over that one connection
+site_url: https://boriken-dev.github.io/coqui-agentic-peer/
+repo_url: https://github.com/Boriken-Dev/coqui-agentic-peer
+repo_name: Boriken-Dev/coqui-agentic-peer
+edit_uri: edit/main/docs/
+
+docs_dir: docs
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - content.code.copy
+
+nav:
+  - Home: index.md
+  - The link: link.md

@@ -1,0 +1,11 @@
+{
+  "name": "coqui-agentic-peer",
+  "version": "0.0.0-alpha.0",
+  "description": "Named channels inside a proven link, for a browser or Node",
+  "license": "MPL-2.0",
+  "private": true,
+  "type": "module",
+  "exports": { "./mux": "./src/mux.mjs" },
+  "engines": { "node": ">=22" },
+  "scripts": { "test": "node --test test/mux.test.mjs" }
+}
