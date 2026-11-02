@@ -124,6 +124,25 @@ fn document(store: &dyn PeerStore, peer: &str, services: &Services) -> Vec<u8> {
         .into_bytes()
 }
 
+/// What a host brings to every link it serves.
+#[derive(Clone, Copy)]
+pub struct Host<'a> {
+    /// Who may open what.
+    pub store: &'a dyn PeerStore,
+    /// What runs.
+    pub services: &'a Services,
+    /// Where events go.
+    pub events: &'a dyn Events,
+}
+
+impl core::fmt::Debug for Host<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Host")
+            .field("services", self.services)
+            .finish_non_exhaustive()
+    }
+}
+
 /// A stream a handler is running, for the loop that re-checks its grant.
 struct Live<'c, C: Channel> {
     stream: Arc<Stream<'c, C>>,
@@ -138,10 +157,13 @@ pub fn serve<C: Channel>(
     options: Options,
     first: Option<Vec<u8>>,
     peer: &str,
-    store: &dyn PeerStore,
-    services: &Services,
-    events: &dyn Events,
+    host: &Host<'_>,
 ) {
+    let Host {
+        store,
+        services,
+        events,
+    } = *host;
     events.event(&Event::LinkUp {
         peer: peer.to_owned(),
     });
@@ -417,9 +439,11 @@ mod tests {
                     options,
                     None,
                     "peer",
-                    store,
-                    &services,
-                    events,
+                    &Host {
+                        store,
+                        services: &services,
+                        events,
+                    },
                 )
             });
             Mux::run(&ours, Side::Dialed, Limits::default(), None, client);
@@ -616,9 +640,11 @@ mod tests {
                     Options::default(),
                     None,
                     "peer",
-                    &store,
-                    &services,
-                    &NoEvents,
+                    &Host {
+                        store: &store,
+                        services: &services,
+                        events: &NoEvents,
+                    },
                 )
             });
             Mux::run(&ours, Side::Dialed, Limits::default(), None, |mux| {

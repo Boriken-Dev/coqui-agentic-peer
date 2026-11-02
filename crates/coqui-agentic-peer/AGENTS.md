@@ -53,7 +53,8 @@ pub fn Services::with(self, protocol: &str, handler: Handler) -> Services   // D
 pub fn Services::offers(&self, protocol: &str) -> bool
 pub fn Services::tokens(&self) -> impl Iterator<Item = &str>
 pub struct Options { pub limits: Limits, pub recheck: Duration }  // non_exhaustive, Default: a second
-pub fn serve<C: Channel>(channel: &C, side: Side, options: Options, first: Option<Vec<u8>>, peer: &str, store: &dyn PeerStore, services: &Services, events: &dyn Events)
+pub struct Host<'a> { pub store: &'a dyn PeerStore, pub services: &'a Services, pub events: &'a dyn Events }
+pub fn serve<C: Channel>(channel: &C, side: Side, options: Options, first: Option<Vec<u8>>, peer: &str, host: &Host<'_>)
 pub struct Capabilities { pub instance: String, pub offers: Vec<String> }  // non_exhaustive
 pub fn capabilities<C: Channel>(mux: &Mux<'_, C>, wait: Duration) -> Result<Capabilities, Failure>
 pub struct Prefilled<'a, C>;  // impl Channel; Prefilled::new(channel, first)
