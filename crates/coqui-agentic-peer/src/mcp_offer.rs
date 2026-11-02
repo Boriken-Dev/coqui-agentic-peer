@@ -37,7 +37,6 @@ const TOKEN_WAIT: Duration = Duration::from_secs(2);
 const STUCK: Duration = Duration::from_secs(30);
 
 /// Serves `mcp-offer/1`. `command` and `args` start [`shim`], and `command` has to be absolute, as ACP says of a stdio server.
-#[must_use]
 pub fn handler(command: PathBuf, args: Vec<String>) -> Handler {
     Box::new(move |stream: &dyn LinkStream, accepted: &Accepted| {
         if let Err(why) = offer(stream, &command, &args, &accepted.metadata) {
