@@ -88,7 +88,7 @@ A stream's data frames are the connection's bytes in order, with no framing of t
 
 ```json
 { "name": "canoa-browser", "command": "/abs/path/coqui-acp-bridge", "args": ["mcp-shim"],
-  "env": [{ "name": "COQUI_MCP_OFFER_ADDRESS", "value": "127.0.0.1:50123" }, { "name": "COQUI_MCP_OFFER_TOKEN", "value": "…" }] }
+  "env": [{ "name": "COQUI_MCP_OFFER_ADDRESS", "value": "127.0.0.1:50123" }, { "name": "COQUI_MCP_OFFER_TOKEN", "value": "â€¦" }] }
 ```
 
 The peer declares that entry to its agent. The program it names connects to the address, which is a loopback port made for this stream, and sends the token and a line feed. From then on each line it carries is one message on the stream, both ways: MCP's own stdio messages, unchanged. A stream message holding a line break ends that connection, since it would forge a second line. Something without the token gets nothing, and a program that ends its server may connect again.
