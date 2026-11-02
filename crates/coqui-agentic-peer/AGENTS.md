@@ -32,10 +32,13 @@ pub fn Stream::try_send(&self, message: &[u8]) -> Result<(), Failure>    // NoPr
 pub fn Stream::finish(&self) -> Result<(), Failure>                      // sends nothing more, goes on reading; the peer's receive answers None
 pub fn Stream::close_with(&self, reason: CloseReason, text: &str)        // refused, superseded or revoked, saying why
 pub fn Stream::end(&self) -> Option<StreamEnd>
+pub fn Stream::finished_by_peer(&self) -> bool                            // the peer sent `finish`; also on LinkStream (default false)
 ```
 
 - `Mux::run` reads the link for as long as `body` runs, on a thread of its own, and does not close the channel. `first` is a message already read, as when `starts_mux` looked at it.
 - `Stream::send` waits up to `send_wait` for credit, then answers `Failure::NoProgress`, uncharged, so a caller may try again. A stream refused, superseded or revoked answers `Failure::Permission`, one that broke its bounds `Failure::Protocol`, and a lost link the link's own failure; `Stream::end` says which.
+- `receive` answers `None` for a peer that called `finish` and for a stream or link closed in order alike. `finished_by_peer` tells them apart: `false` after a `None` means what arrived may be part of what the peer meant to send. In JavaScript it is `stream.finishedByPeer`, in Dart `MuxStream.finishedByPeer`.
+- Opens leave in id order whatever the thread count, and an open whose frame could not be sent leaves nothing in the stream table. In JavaScript and Dart `open` is one at a time for the same reason.
 - A long message is cut into frames of `max_frame`, so another stream's message passes between its parts. Only the first part can be taken back: past that, a link that will not take the rest is lost.
 - A stream delivers in order or fails, and never skips. Nothing is ordered across streams. Nothing replays: to survive a drop, reopen with your own cursor in `metadata`. Either side opens streams, whoever connected.
 - `Limits::heartbeat` is off by default, and a zero interval or zero misses turns it off too. It loses a link only when nothing at all is heard, so a stream silent for hours is fine. `link_state` says when a link went; what that means is the host's to decide.

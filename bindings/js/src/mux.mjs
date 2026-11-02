@@ -202,6 +202,14 @@ class Stream {
     await this.sendParts(body);
   }
 
+  /**
+   * Whether the peer said it was done sending with finish. receive answers null both for that and for a stream or link closed in
+   * order, and this tells them apart: false after a null means what the peer sent may be a part of what it meant to.
+   */
+  get finishedByPeer() {
+    return this.peerFinished;
+  }
+
   /** The next message, or null when the stream ended in order. Throws StreamEnded otherwise. */
   async receive() {
     for (;;) {
@@ -256,6 +264,7 @@ class Mux {
   opensThisMinute = 0;
   minuteBegan = Date.now();
   accepting = new Waiters();
+  opening = Promise.resolve();
 
   constructor(link, side, limits) {
     this.link = link;
@@ -285,7 +294,16 @@ class Mux {
     this.nextStream += 2;
     const stream = new Stream(this, id, protocol);
     this.streams.set(id, stream);
-    await this.send({ kind: 'open', stream: id, protocol, metadata });
+    // One open at a time, in id order: the link may take a send a while, and a lower id after a higher one ends the peer's link.
+    const turn = this.opening.then(() => this.send({ kind: 'open', stream: id, protocol, metadata }));
+    this.opening = turn.catch(() => {});
+    try {
+      await turn;
+    } catch (error) {
+      // The peer never heard of it, so it must not count against the limits here. Ids may skip.
+      this.streams.delete(id);
+      throw error;
+    }
     return stream;
   }
 

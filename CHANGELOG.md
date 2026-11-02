@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `Stream::finished_by_peer`, `LinkStream::finished_by_peer`, and `finishedByPeer` in JavaScript and Dart: whether the peer sent `finish`, since a receive answers `None` for a close in order as well.
 - `mcp_offer`: `mcp-offer/1`, a peer serving its own MCP tools to a program here, through a stdio shim and a loopback port with a token that last as long as the stream.
 - `forward`: `tcp/1`, one TCP connection per stream in either direction, with each target its own grant, refused before anything connects.
 - `Services::with_admission` and `serve_with`, and `LinkStream` in `Handler`, so a service can half-close and say why a stream ended.
@@ -17,3 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `home`: one identity and one trust store per user, shared by every program and capability, and only a default.
 - `peers`: claims and grants per peer behind a `PeerStore` trait, with audit events. `link`: serving a link under them, failing closed, with a capability document saying what a peer may open and which process it is talking to.
 - `auth`, `pairing`, `discovery` and `companion`, from `coqui-acp-bridge`.
+
+### Fixed
+
+- `mux`: streams opened at once from several threads are opened in id order, so a lower id no longer follows a higher one and ends the peer's link; the same in JavaScript and Dart. An `open` whose frame could not be sent leaves no stream behind.
+- `mcp_offer`: the relay polls a non-blocking socket instead of using a read timeout, which can fail on Windows as data arrives and read as the connection ending; a partial write goes on where it stopped.

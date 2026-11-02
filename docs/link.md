@@ -40,7 +40,7 @@ A **protocol token** is printable ASCII with no space, comma or equals sign, at 
 
 ## Streams
 
-The side that connected uses odd ids and the other even ones, so the two never choose the same id. Ids only go up, so a stream that has ended cannot be opened again. An `open` with an id from the wrong side's range, or one not above the last, ends the link.
+The side that connected uses odd ids and the other even ones, so the two never choose the same id. Ids only go up, so a stream that has ended cannot be opened again. An `open` with an id from the wrong side's range, or one not above the last, ends the link, so a sender puts its `open` frames on the link in the order it chose their ids, whatever threads open at once. Ids may skip: an `open` that could not be sent leaves a gap.
 
 Either side may open a stream, whoever connected. The other either serves it or answers `close` with `refused`, because nobody serves that protocol there or this peer may not open it. A proof admits a peer to the link, and being admitted to the link grants no protocol.
 
@@ -49,6 +49,8 @@ Either side may open a stream, whoever connected. The other either serves it or 
 A message may be cut into `more` frames and a last `data`, 64 KiB each by default, so a long one cannot hold other streams up for as long as it takes, and an interrupt passes between two parts of someone else's message. The parts of one message arrive in order, and only a whole message is delivered.
 
 `finish` is half a close: a request answered on the same stream sends it after the request. The peer's reader then sees the end after what was sent, which tells a finished message from a truncated one, and it may go on answering. `data` after `finish` breaks the stream. `close` ends both directions.
+
+A reader gets the same end of stream from a peer that sent `finish` and from a stream or link closed in order with no `finish`, so an implementation exposes whether `finish` arrived (`finished_by_peer`, `finishedByPeer`). A protocol that needs the whole of a message tells them apart: a close without `finish` may have cut the message short.
 
 ## Delivery
 

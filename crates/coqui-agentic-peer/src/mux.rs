@@ -379,6 +379,9 @@ struct State {
 struct Shared {
     state: Mutex<State>,
     changed: Condvar,
+    /// Held from choosing a stream id until its `OPEN` is sent, so opens leave in id order: a lower id after a higher one ends the
+    /// peer's link. Only `open_with` takes it, and never while waiting on the state, so the reader is never held up by it.
+    opening: Mutex<()>,
     limits: Limits,
     stop: AtomicBool,
     side: Side,
@@ -473,6 +476,7 @@ impl<'c, C: Channel> Mux<'c, C> {
                 last_heard: Instant::now(),
             }),
             changed: Condvar::new(),
+            opening: Mutex::new(()),
             limits,
             stop: AtomicBool::new(false),
             side,
@@ -518,6 +522,12 @@ impl<'c, C: Channel> Mux<'c, C> {
         if !valid_protocol(protocol) || metadata.len() > limits.max_metadata {
             return Err(Failure::Protocol);
         }
+        // The id and its `OPEN` go out together: two threads opening at once must not send the higher id first.
+        let _opening = self
+            .shared
+            .opening
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let stream = {
             let mut state = self.shared.lock();
             if let Some(failure) = state.link {
@@ -543,14 +553,19 @@ impl<'c, C: Channel> Mux<'c, C> {
             );
             stream
         };
-        control(
+        let sent = control(
             self.channel,
             &Frame::Open {
                 stream,
                 protocol: protocol.to_owned(),
                 metadata: metadata.to_vec(),
             },
-        )?;
+        );
+        if let Err(failure) = sent {
+            // The peer never heard of it, so it must not count against the limits here. Its id is not reused, and ids may skip.
+            self.shared.lock().streams.remove(&stream);
+            return Err(failure);
+        }
         Ok(self.handle(stream))
     }
 
@@ -924,6 +939,12 @@ pub trait LinkStream: Channel {
     /// The link's own failure.
     fn finish(&self) -> Result<(), Failure>;
 
+    /// See [`Stream::finished_by_peer`]. A carrier that cannot tell answers `false`, which is what this says unless it is
+    /// overridden.
+    fn finished_by_peer(&self) -> bool {
+        false
+    }
+
     /// See [`Stream::close_with`].
     fn close_with(&self, reason: CloseReason, text: &str);
 }
@@ -948,6 +969,10 @@ impl<C: Channel> LinkStream for Stream<'_, C> {
         Stream::finish(self)
     }
 
+    fn finished_by_peer(&self) -> bool {
+        Stream::finished_by_peer(self)
+    }
+
     fn close_with(&self, reason: CloseReason, text: &str) {
         Stream::close_with(self, reason, text);
     }
@@ -962,6 +987,18 @@ impl<C: Channel> Stream<'_, C> {
             .streams
             .get(&self.id)
             .and_then(|entry| entry.ended.clone())
+    }
+
+    /// Whether the peer said it was done sending with [`Stream::finish`]. A receive answers `None` both for that and for a stream
+    /// or link closed in order, and this tells them apart: `false` after `None` means what the peer sent may be a part of what it
+    /// meant to. It stays `true` once the peer's `finish` has arrived, however the stream ends after.
+    #[must_use]
+    pub fn finished_by_peer(&self) -> bool {
+        self.shared
+            .lock()
+            .streams
+            .get(&self.id)
+            .is_some_and(|entry| entry.peer_finished)
     }
 
     /// Sends now or says it cannot: [`Failure::NoProgress`] means full, for a host that would rather drop a slow reader than wait.
@@ -1333,6 +1370,148 @@ mod tests {
                 thread::sleep(Duration::from_millis(100));
             },
         );
+    }
+
+    #[test]
+    fn a_receive_ending_in_none_says_whether_the_peer_finished() {
+        // Finished, then closed: the whole of what it meant to send.
+        both(
+            Limits::default(),
+            |mux| {
+                let stream = mux.open("a2a/1").unwrap();
+                assert!(!stream.finished_by_peer());
+                stream.send(b"request").unwrap();
+                stream.finish().unwrap();
+                assert_eq!(stream.receive(WAIT).unwrap().unwrap(), b"answer");
+                assert_eq!(stream.receive(WAIT).unwrap(), None);
+                assert!(stream.finished_by_peer());
+                assert!(LinkStream::finished_by_peer(&stream));
+            },
+            |mux| {
+                let incoming = accepted(mux);
+                incoming.stream.receive(WAIT).unwrap().unwrap();
+                incoming.stream.send(b"answer").unwrap();
+                incoming.stream.finish().unwrap();
+                thread::sleep(Duration::from_millis(100));
+                drop(incoming);
+                thread::sleep(Duration::from_millis(100));
+            },
+        );
+        // Closed in order with no finish: the same `None`, and not finished.
+        both(
+            Limits::default(),
+            |mux| {
+                let stream = mux.open("a2a/1").unwrap();
+                stream.send(b"request").unwrap();
+                assert_eq!(stream.receive(WAIT).unwrap().unwrap(), b"partial");
+                assert_eq!(stream.receive(WAIT).unwrap(), None);
+                assert_eq!(stream.end(), Some(StreamEnd::PeerClosed));
+                assert!(!stream.finished_by_peer());
+                assert!(!LinkStream::finished_by_peer(&stream));
+            },
+            |mux| {
+                let incoming = accepted(mux);
+                incoming.stream.receive(WAIT).unwrap().unwrap();
+                incoming.stream.send(b"partial").unwrap();
+                drop(incoming);
+                thread::sleep(Duration::from_millis(100));
+            },
+        );
+    }
+
+    #[test]
+    fn a_link_ended_in_order_without_a_finish_is_not_finished() {
+        let (a, b) = wires();
+        thread::scope(|scope| {
+            scope.spawn(move || {
+                Mux::run(&b, Side::Answered, Limits::default(), None, |mux| {
+                    let incoming = accepted(mux);
+                    incoming.stream.receive(WAIT).unwrap().unwrap();
+                    // Only the link ends, with no frame for the stream.
+                    std::mem::forget(incoming);
+                });
+                drop(b);
+            });
+            Mux::run(&a, Side::Dialed, Limits::default(), None, |mux| {
+                let stream = mux.open("a2a/1").unwrap();
+                stream.send(b"request").unwrap();
+                assert_eq!(stream.receive(WAIT).unwrap(), None);
+                assert_eq!(stream.end(), Some(StreamEnd::PeerClosed));
+                assert!(!stream.finished_by_peer());
+            });
+        });
+    }
+
+    /// A link whose sends take a different time each, as a busy one does, so frames sent at once can leave in any order.
+    struct Jittery<'a> {
+        wire: &'a Wire,
+        sends: std::sync::atomic::AtomicU32,
+    }
+
+    impl Channel for Jittery<'_> {
+        fn send(&self, message: &[u8]) -> Result<(), Failure> {
+            let turn = self.sends.fetch_add(1, Ordering::SeqCst);
+            thread::sleep(Duration::from_micros(u64::from(turn * 7 % 5) * 400));
+            self.wire.send(message)
+        }
+
+        fn receive(&self, timeout: Option<Duration>) -> Result<Option<Vec<u8>>, Failure> {
+            self.wire.receive(timeout)
+        }
+
+        fn close(&self) {
+            self.wire.close();
+        }
+    }
+
+    #[test]
+    fn streams_opened_at_once_from_many_threads_are_opened_in_order() {
+        const THREADS: usize = 12;
+        for _ in 0..20 {
+            let (a, b) = wires();
+            let jittery = Jittery {
+                wire: &a,
+                sends: std::sync::atomic::AtomicU32::new(0),
+            };
+            let limits = Limits {
+                max_pending_opens: THREADS,
+                ..Limits::default()
+            };
+            thread::scope(|scope| {
+                scope.spawn(|| {
+                    Mux::run(&jittery, Side::Dialed, limits, None, |mux| {
+                        let barrier = std::sync::Barrier::new(THREADS);
+                        thread::scope(|opening| {
+                            for _ in 0..THREADS {
+                                opening.spawn(|| {
+                                    barrier.wait();
+                                    let stream = mux.open("a2a/1").unwrap();
+                                    stream.send(b"hello").unwrap();
+                                    thread::sleep(Duration::from_millis(300));
+                                });
+                            }
+                        });
+                    });
+                });
+                Mux::run(&b, Side::Answered, limits, None, |mux| {
+                    for _ in 0..THREADS {
+                        let incoming = accepted(mux);
+                        assert_eq!(incoming.stream.receive(WAIT).unwrap().unwrap(), b"hello");
+                    }
+                    assert_eq!(mux.link_state(), LinkState::Up);
+                });
+            });
+        }
+    }
+
+    #[test]
+    fn an_open_that_cannot_be_sent_leaves_no_stream_behind() {
+        let (ours, theirs) = wires();
+        drop(theirs);
+        Mux::run(&ours, Side::Dialed, Limits::default(), None, |mux| {
+            assert_eq!(mux.open("a2a/1").err(), Some(Failure::PathLost));
+            assert!(mux.shared.lock().streams.is_empty());
+        });
     }
 
     #[test]

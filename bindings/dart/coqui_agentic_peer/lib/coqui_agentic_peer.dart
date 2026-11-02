@@ -319,6 +319,10 @@ final class MuxStream {
     await _mux._send(FinishFrame(id));
   }
 
+  /// Whether the peer said it was done sending with [finish]. [receive] answers null both for that and for a stream or link closed
+  /// in order, and this tells them apart: false after a null means what the peer sent may be a part of what it meant to.
+  bool get finishedByPeer => _peerFinished;
+
   /// The next message, or null when the stream ended in order. Throws [StreamEnded] otherwise.
   Future<Uint8List?> receive() async {
     for (;;) {
@@ -424,6 +428,7 @@ final class Mux {
   String? _ended;
   DateTime? _endedAt;
   Completer<void> _accepting = Completer();
+  Future<void> _opening = Future.value();
 
   /// Why the link ended, or null while it is up.
   String? get ended => _ended;
@@ -460,7 +465,16 @@ final class Mux {
     _nextStream += 2;
     final stream = MuxStream._(this, id, protocol, bytes);
     _streams[id] = stream;
-    await _send(OpenFrame(id, protocol, bytes));
+    // One open at a time, in id order: the link may take a send a while, and a lower id after a higher one ends the peer's link.
+    final turn = _opening.then((_) => _send(OpenFrame(id, protocol, bytes)));
+    _opening = turn.catchError((Object _) {});
+    try {
+      await turn;
+    } catch (_) {
+      // The peer never heard of it, so it must not count against the limits here. Ids may skip.
+      _streams.remove(id);
+      rethrow;
+    }
     return stream;
   }
 

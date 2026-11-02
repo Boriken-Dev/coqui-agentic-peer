@@ -426,4 +426,96 @@ void main() {
       expect(await mux.accept().timeout(_wait), isNull);
     },
   );
+
+  test(
+    'streams opened at once are opened in order, whatever the link takes to send each',
+    () async {
+      for (var round = 0; round < 4; round += 1) {
+        final toA = StreamController<Uint8List>();
+        final toB = StreamController<Uint8List>();
+        var turn = 0;
+        Future<void> slow(
+          StreamController<Uint8List> to,
+          Uint8List message,
+        ) async {
+          turn += 1;
+          await Future<void>.delayed(Duration(milliseconds: (turn * 7) % 5));
+          to.add(message);
+        }
+
+        const limits = MuxLimits(maxPendingOpens: 12);
+        final client = Mux(
+          incoming: toA.stream,
+          send: (message) => slow(toB, message),
+          side: Side.dialed,
+          limits: limits,
+        );
+        final server = Mux(
+          incoming: toB.stream,
+          send: (message) => slow(toA, message),
+          side: Side.answered,
+          limits: limits,
+        );
+        final opened = await Future.wait([
+          for (var count = 0; count < 12; count += 1) client.open('a2a/1'),
+        ]).timeout(_wait);
+        for (final stream in opened) {
+          await stream.send(_bytes('hello'));
+        }
+        for (var count = 0; count < 12; count += 1) {
+          final incoming = (await server.accept().timeout(_wait))!;
+          expect(
+            utf8.decode((await incoming.receive().timeout(_wait))!),
+            'hello',
+          );
+        }
+        expect(server.ended, isNull);
+        await client.close();
+        await server.close();
+      }
+    },
+  );
+
+  test('an open the link cannot send leaves no stream behind', () async {
+    final mux = Mux(
+      incoming: StreamController<Uint8List>().stream,
+      send: (message) async => throw StateError('link down'),
+      side: Side.dialed,
+      limits: const MuxLimits(maxStreams: 1),
+    );
+    await expectLater(mux.open('a2a/1'), throwsStateError);
+    await expectLater(
+      mux.open('a2a/1'),
+      throwsA(
+        isA<StateError>().having((e) => e.message, 'message', 'link down'),
+      ),
+      reason: 'the table has room again, so it is the send that fails',
+    );
+  });
+
+  test(
+    'a null from receive says whether the peer finished or the stream was only closed',
+    () async {
+      final (client, server) = _pair();
+      final finished = await client.open('a2a/1');
+      final closed = await client.open('a2a/1');
+      final theirFinished = (await server.accept().timeout(_wait))!;
+      final theirClosed = (await server.accept().timeout(_wait))!;
+      expect(theirFinished.finishedByPeer, isFalse);
+      await finished.send(_bytes('request'));
+      await closed.send(_bytes('request'));
+      await theirFinished.receive().timeout(_wait);
+      await theirClosed.receive().timeout(_wait);
+      await theirFinished.send(_bytes('whole'));
+      await theirFinished.finish();
+      await theirClosed.send(_bytes('part'));
+      theirClosed.close();
+      expect(utf8.decode((await finished.receive().timeout(_wait))!), 'whole');
+      expect(await finished.receive().timeout(_wait), isNull);
+      expect(finished.finishedByPeer, isTrue);
+      expect(utf8.decode((await closed.receive().timeout(_wait))!), 'part');
+      expect(await closed.receive().timeout(_wait), isNull);
+      expect(closed.finishedByPeer, isFalse);
+    },
+  );
 }

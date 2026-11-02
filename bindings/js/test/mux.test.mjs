@@ -280,3 +280,66 @@ test('a closed link ends every stream, and data for an ended stream is ignored',
   assert.equal(await mux.accept(), null);
   frame({ kind: 'data', stream: 9, body: new Uint8Array(1) });
 });
+
+/** Two ends whose sends each take a different time, as a link doing work before it writes does. */
+function jittery() {
+  const { a, b, dialed, answered } = pair();
+  let turn = 0;
+  const slow = (self, link) => ({
+    ...link,
+    send: async (message) => {
+      turn += 1;
+      await new Promise((resolve) => setTimeout(resolve, (turn * 7) % 5));
+      self.peer.listen?.(message);
+    },
+  });
+  return { dialed: slow(a, dialed), answered: slow(b, answered) };
+}
+
+test('streams opened at once are opened in order, whatever the link takes to send each', async () => {
+  for (let round = 0; round < 4; round += 1) {
+    const { dialed, answered } = jittery();
+    const client = createMux(dialed, { side: 'dialed', limits: { maxPendingOpens: 12 } });
+    const server = createMux(answered, { side: 'answered', limits: { maxPendingOpens: 12 } });
+    const opened = await within(Promise.all(Array.from({ length: 12 }, () => client.open('a2a/1'))));
+    for (const stream of opened) await stream.send('hello');
+    for (let count = 0; count < 12; count += 1) {
+      const incoming = await within(server.accept());
+      assert.equal(text(await within(incoming.receive())), 'hello');
+    }
+    assert.equal(server.linkState().up, true);
+  }
+});
+
+test('an open the link cannot send leaves no stream behind', async () => {
+  const { dialed } = pair();
+  const failing = { ...dialed, send: async () => { throw new Error('link down'); } };
+  const client = createMux(failing, { side: 'dialed', limits: { maxStreams: 1 } });
+  await assert.rejects(client.open('a2a/1'), /link down/);
+  await assert.rejects(client.open('a2a/1'), /link down/, 'the table has room again, so it is the send that fails and not the limit');
+});
+
+test('a null from receive says whether the peer finished or the stream was only closed', async () => {
+  const { dialed, answered } = pair();
+  const client = createMux(dialed, { side: 'dialed' });
+  const server = createMux(answered, { side: 'answered' });
+  const finished = await client.open('a2a/1');
+  const closed = await client.open('a2a/1');
+  const theirFinished = await within(server.accept());
+  const theirClosed = await within(server.accept());
+  assert.equal(theirFinished.finishedByPeer, false);
+  await finished.send('request');
+  await closed.send('request');
+  await within(theirFinished.receive());
+  await within(theirClosed.receive());
+  await theirFinished.send('whole');
+  await theirFinished.finish();
+  await theirClosed.send('part');
+  theirClosed.close();
+  assert.equal(text(await within(finished.receive())), 'whole');
+  assert.equal(await within(finished.receive()), null);
+  assert.equal(finished.finishedByPeer, true);
+  assert.equal(text(await within(closed.receive())), 'part');
+  assert.equal(await within(closed.receive()), null);
+  assert.equal(closed.finishedByPeer, false);
+});
