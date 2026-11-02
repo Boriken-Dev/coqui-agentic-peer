@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use coqui_web::{Channel, Failure};
 use serde_json::{Value, json};
 
-use crate::mux::{CloseReason, Incoming, Limits, Mux, Side, Stream};
+use crate::mux::{CloseReason, Incoming, Limits, LinkStream, Mux, Side, Stream};
 use crate::peers::{Event, Events, PeerRecord, PeerStore};
 
 /// The stream that says what a link offers. Any admitted peer may open it, and it answers with what that peer may open.
@@ -51,11 +51,20 @@ pub struct Accepted {
 }
 
 /// What serves one protocol. It runs on a thread of its own, until it returns or its stream ends.
-pub type Handler = Box<dyn Fn(&dyn Channel, &Accepted) + Send + Sync>;
+pub type Handler = Box<dyn Fn(&dyn LinkStream, &Accepted) + Send + Sync>;
+
+/// What a protocol decides beyond its own grant, from what was opened with: whether this record allows what this stream is for. It
+/// is asked before the handler runs and again while the stream does, so it must be quick and must not touch anything outside.
+pub type Admission = Box<dyn Fn(&PeerRecord, &[u8]) -> Result<(), &'static str> + Send + Sync>;
+
+struct Service {
+    handler: Handler,
+    admission: Option<Admission>,
+}
 
 /// The protocols this host serves.
 #[derive(Default)]
-pub struct Services(BTreeMap<String, Handler>);
+pub struct Services(BTreeMap<String, Service>);
 
 impl core::fmt::Debug for Services {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -67,7 +76,31 @@ impl Services {
     /// Serves `protocol` with `handler`.
     #[must_use]
     pub fn with(mut self, protocol: &str, handler: Handler) -> Self {
-        self.0.insert(protocol.to_owned(), handler);
+        self.0.insert(
+            protocol.to_owned(),
+            Service {
+                handler,
+                admission: None,
+            },
+        );
+        self
+    }
+
+    /// Serves `protocol` with `handler`, under `admission` as well as the protocol's own grant.
+    #[must_use]
+    pub fn with_admission(
+        mut self,
+        protocol: &str,
+        handler: Handler,
+        admission: Admission,
+    ) -> Self {
+        self.0.insert(
+            protocol.to_owned(),
+            Service {
+                handler,
+                admission: Some(admission),
+            },
+        );
         self
     }
 
@@ -103,12 +136,25 @@ impl Default for Options {
 }
 
 /// Why a protocol is not this peer's. Not being able to tell counts: a store that cannot be read must not let anything in.
-fn decide(store: &dyn PeerStore, peer: &str, protocol: &str) -> Result<PeerRecord, &'static str> {
-    match store.get(peer) {
-        Ok(Some(record)) if record.grants.contains(protocol) => Ok(record),
-        Ok(_) => Err("this peer may not open that"),
-        Err(_) => Err("the host cannot say who may open that"),
+fn decide(
+    store: &dyn PeerStore,
+    services: &Services,
+    peer: &str,
+    protocol: &str,
+    metadata: &[u8],
+) -> Result<PeerRecord, &'static str> {
+    let Some(service) = services.0.get(protocol) else {
+        return Err("nobody serves that here");
+    };
+    let record = match store.get(peer) {
+        Ok(Some(record)) if record.grants.contains(protocol) => record,
+        Ok(_) => return Err("this peer may not open that"),
+        Err(_) => return Err("the host cannot say who may open that"),
+    };
+    if let Some(admission) = &service.admission {
+        admission(&record, metadata)?;
     }
+    Ok(record)
 }
 
 fn document(store: &dyn PeerStore, peer: &str, services: &Services) -> Vec<u8> {
@@ -147,6 +193,7 @@ impl core::fmt::Debug for Host<'_> {
 struct Live<'c, C: Channel> {
     stream: Arc<Stream<'c, C>>,
     protocol: String,
+    metadata: Vec<u8>,
     done: Arc<AtomicBool>,
 }
 
@@ -159,6 +206,20 @@ pub fn serve<C: Channel>(
     peer: &str,
     host: &Host<'_>,
 ) {
+    serve_with(channel, side, options, first, peer, host, |_| {});
+}
+
+/// As [`serve`], with `opener` running on a thread of its own, for a host that also opens streams to this peer. The link is served
+/// until it ends whether or not `opener` has returned, so `opener` watches [`Mux::link_state`] rather than ending the link.
+pub fn serve_with<'c, C: Channel>(
+    channel: &'c C,
+    side: Side,
+    options: Options,
+    first: Option<Vec<u8>>,
+    peer: &str,
+    host: &Host<'_>,
+    opener: impl FnOnce(&Mux<'c, C>) + Send,
+) {
     let Host {
         store,
         services,
@@ -169,6 +230,7 @@ pub fn serve<C: Channel>(
     });
     Mux::run(channel, side, options.limits, first, |mux| {
         thread::scope(|scope| {
+            scope.spawn(|| opener(mux));
             let live: Mutex<Vec<Live<'_, C>>> = Mutex::new(Vec::new());
             let mut checked = Instant::now();
             loop {
@@ -189,12 +251,7 @@ pub fn serve<C: Channel>(
                             });
                             continue;
                         }
-                        let record = if services.offers(&protocol) {
-                            decide(store, peer, &protocol)
-                        } else {
-                            Err("nobody serves that here")
-                        };
-                        match record {
+                        match decide(store, services, peer, &protocol, &metadata) {
                             Err(why) => {
                                 stream.close_with(CloseReason::Refused, why);
                                 events.event(&Event::Refused {
@@ -214,6 +271,7 @@ pub fn serve<C: Channel>(
                                     .push(Live {
                                         stream: Arc::clone(&stream),
                                         protocol: protocol.clone(),
+                                        metadata: metadata.clone(),
                                         done: Arc::clone(&done),
                                     });
                                 let accepted = Accepted {
@@ -223,8 +281,8 @@ pub fn serve<C: Channel>(
                                     metadata,
                                 };
                                 scope.spawn(move || {
-                                    if let Some(handler) = services.0.get(&protocol) {
-                                        handler(&*stream, &accepted);
+                                    if let Some(service) = services.0.get(&protocol) {
+                                        (service.handler)(&*stream, &accepted);
                                     }
                                     done.store(true, Ordering::SeqCst);
                                     Channel::close(&*stream);
@@ -240,7 +298,9 @@ pub fn serve<C: Channel>(
                     let mut held = live.lock().unwrap_or_else(PoisonError::into_inner);
                     held.retain(|running| !running.done.load(Ordering::SeqCst));
                     for running in held.iter() {
-                        if decide(store, peer, &running.protocol).is_err() {
+                        if decide(store, services, peer, &running.protocol, &running.metadata)
+                            .is_err()
+                        {
                             running.stream.close_with(
                                 CloseReason::Revoked,
                                 "this peer may no longer use that",

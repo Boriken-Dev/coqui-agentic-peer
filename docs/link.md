@@ -74,6 +74,14 @@ Any admitted peer may open `link/1`. The other side answers with one JSON messag
 
 A key is one entry in one store, so a new capability is a grant on that entry and never another pairing. Each open is decided against the grants, and each running stream again at an interval the host sets. A grant taken away ends its stream with `revoked`. A store that cannot be read refuses, so nothing fails open.
 
+## Forwarding TCP
+
+`tcp/1` carries one TCP connection per stream. The opener puts the target in the stream's metadata as `HOST:PORT` in UTF-8, with an IPv6 address in brackets. The answering side compares it, spelled one way (a lowercase name, a shortened IPv6 address), against what this peer was granted: it needs `tcp/1` and `tcp/1:HOST:PORT`, nothing else matches, and there are no wildcards. `localhost:80` and `127.0.0.1:80` are different targets, and a name is resolved by the side that connects.
+
+A target is decided before anything connects, so a refusal says nothing about what is there. It is decided again while the stream runs, so removing either grant closes the stream with reason `revoked`. A granted target that cannot be reached closes it with reason `refused`.
+
+A stream's data frames are the connection's bytes in order, with no framing of their own. `finish` is a FIN: each direction ends by itself, and a client that stops sending still gets its answer. Closing a stream for any other reason drops the connection. Either side may open, so a forward runs in either direction, and each side decides from its own grants.
+
 ## Flow control
 
 Each direction of each stream starts with a window of credit, 1 MiB by default. Sending a message costs its size in credit. A sender MAY start a message only while its credit is above zero, so a message larger than the window still passes, one at a time. A receiver returns credit as the application reads, not as the link delivers.

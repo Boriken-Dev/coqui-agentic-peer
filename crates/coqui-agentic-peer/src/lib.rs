@@ -9,6 +9,7 @@
 pub mod auth;
 pub mod companion;
 pub mod discovery;
+pub mod forward;
 pub mod home;
 pub mod link;
 pub mod mux;

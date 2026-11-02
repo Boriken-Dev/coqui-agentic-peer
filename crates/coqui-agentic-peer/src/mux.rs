@@ -900,6 +900,29 @@ impl<C: Channel> core::fmt::Debug for Stream<'_, C> {
     }
 }
 
+/// A stream as a service sees it, whatever carries the link: it can stop sending and go on reading, and say why it ended.
+pub trait LinkStream: Channel {
+    /// See [`Stream::finish`].
+    ///
+    /// # Errors
+    ///
+    /// The link's own failure.
+    fn finish(&self) -> Result<(), Failure>;
+
+    /// See [`Stream::close_with`].
+    fn close_with(&self, reason: CloseReason, text: &str);
+}
+
+impl<C: Channel> LinkStream for Stream<'_, C> {
+    fn finish(&self) -> Result<(), Failure> {
+        Stream::finish(self)
+    }
+
+    fn close_with(&self, reason: CloseReason, text: &str) {
+        Stream::close_with(self, reason, text);
+    }
+}
+
 impl<C: Channel> Stream<'_, C> {
     /// Why it ended, once it has.
     #[must_use]

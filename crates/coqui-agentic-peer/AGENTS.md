@@ -53,6 +53,9 @@ pub fn Services::with(self, protocol: &str, handler: Handler) -> Services   // D
 pub fn Services::offers(&self, protocol: &str) -> bool
 pub fn Services::tokens(&self) -> impl Iterator<Item = &str>
 pub struct Options { pub limits: Limits, pub recheck: Duration }  // non_exhaustive, Default: a second
+pub type Admission = Box<dyn Fn(&PeerRecord, &[u8]) -> Result<(), &'static str> + Send + Sync>;   // asked at open and while running
+Services::with_admission(self, protocol: &str, handler: Handler, admission: Admission) -> Self
+pub fn serve_with<'c, C: Channel>(channel: &'c C, side: Side, options: Options, first: Option<Vec<u8>>, peer: &str, host: &Host<'_>, opener: impl FnOnce(&Mux<'c, C>) + Send)
 pub struct Host<'a> { pub store: &'a dyn PeerStore, pub services: &'a Services, pub events: &'a dyn Events }
 pub fn serve<C: Channel>(channel: &C, side: Side, options: Options, first: Option<Vec<u8>>, peer: &str, host: &Host<'_>)
 pub struct Capabilities { pub instance: String, pub offers: Vec<String> }  // non_exhaustive
@@ -171,3 +174,22 @@ It answers `{ "op": "discover", "seconds": N }`, at most 10 seconds, and nothing
 - mDNS stays on the link. `discover` does not check that an answer came from the link, so anyone who can reach UDP 5353 here can send a record. A record is a claim either way.
 - On Windows, the first time a program listens or joins multicast the firewall may ask, and an answer of no leaves an inbound block rule for that path. `discover` then sees agents on this machine and none on others.
 - A key file's permissions are set only on Unix; elsewhere it takes its directory's. Nothing checks them on reading.
+
+## `forward`
+
+`tcp/1`: one TCP connection per stream, in either direction. The widest capability there is, so a peer needs `tcp/1` and a grant naming the target exactly, with no wildcards. A refusal happens before anything connects, and removing either grant ends running streams within `Options::recheck`.
+
+```rust
+pub const TCP_PROTOCOL: &str = "tcp/1";
+pub struct Target;                                    // FromStr, Display: HOST:PORT in one spelling; "localhost:80" is not "127.0.0.1:80"
+Target::grant_token(&self) -> String                  // "tcp/1:HOST:PORT"
+Target::from_grant_token(token: &str) -> Option<Target>
+pub fn grant(record: PeerRecord, target: &Target) -> PeerRecord
+pub fn serving(services: Services) -> Services        // adds tcp/1
+pub fn connect<'c, C: Channel>(mux: &Mux<'c, C>, target: &Target) -> Result<Stream<'c, C>, Failure>
+pub fn pump<S: LinkStream + ?Sized>(stream: &S, connection: &TcpStream)   // until both directions end; FIN maps to finish
+pub fn listen<C: Channel>(mux: &Mux<'_, C>, listener: &TcpListener, target: &Target) -> io::Result<()>   // until the link ends
+pub fn is_loopback(address: IpAddr) -> bool
+```
+
+Gotchas: whoever can connect to a `listen`er gets what this peer was granted, so bind it to loopback. `Limits::max_message` has to allow 16 KiB. A name is resolved by the side connecting, each time, so a grant on a name trusts that name's DNS.
