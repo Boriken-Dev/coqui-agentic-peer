@@ -2,7 +2,7 @@
 
 Header-file-style reference for the `coqui-agentic-peer` crate, so it can be used without reading the source. It ships inside the package and is self-contained.
 
-No Cargo features. MSRV Rust 1.89. Version `0.0.0-alpha.0`, not published. It depends on `coqui-web`, `coqui-peer`, `coqui-peer-webcrypto`, `mdns-sd`, `serde_json` and `url`. No `unsafe` code. Public modules: `auth`, `companion`, `discovery`, `home`, `mux`, `pairing`.
+No Cargo features. MSRV Rust 1.89. Version `0.0.0-alpha.0`, not published. It depends on `coqui-web`, `coqui-peer`, `coqui-peer-webcrypto`, `mdns-sd`, `serde_json` and `url`. No `unsafe` code. Public modules: `auth`, `companion`, `discovery`, `home`, `link`, `mux`, `pairing`, `peers`.
 
 ## `coqui_agentic_peer::mux`
 
@@ -42,6 +42,40 @@ pub fn Stream::end(&self) -> Option<StreamEnd>
 - What one stream does wrong ends that stream. What no peer may send ends the link.
 - A proof admits a peer to the link and grants no protocol. Deciding who may open what is the caller's: `accept`, then serve, or `close_with(CloseReason::Refused, why)`. `metadata` is kept nowhere, and is not a credential of the link's.
 
+## `coqui_agentic_peer::link`
+
+```rust
+pub const LINK_PROTOCOL: &str = "link/1";
+pub fn instance() -> &'static str                // random per process
+pub struct Accepted { pub peer: String, pub claims: BTreeMap<String, String>, pub protocol: String, pub metadata: Vec<u8> }  // non_exhaustive
+pub type Handler = Box<dyn Fn(&dyn Channel, &Accepted) + Send + Sync>;
+pub fn Services::with(self, protocol: &str, handler: Handler) -> Services   // Default
+pub fn Services::offers(&self, protocol: &str) -> bool
+pub fn Services::tokens(&self) -> impl Iterator<Item = &str>
+pub struct Options { pub limits: Limits, pub recheck: Duration }  // non_exhaustive, Default: a second
+pub fn serve<C: Channel>(channel: &C, side: Side, options: Options, first: Option<Vec<u8>>, peer: &str, store: &dyn PeerStore, services: &Services, events: &dyn Events)
+pub struct Capabilities { pub instance: String, pub offers: Vec<String> }  // non_exhaustive
+pub fn capabilities<C: Channel>(mux: &Mux<'_, C>, wait: Duration) -> Result<Capabilities, Failure>
+pub struct Prefilled<'a, C>;  // impl Channel; Prefilled::new(channel, first)
+```
+
+`serve` runs one handler thread per stream, so a slow service holds up nothing, up to `Limits::max_streams`. Every open is decided against `PeerStore::get`, and every running stream again each `recheck`. A store error refuses, so nothing fails open. A taken-away grant closes the stream with `CloseReason::Revoked`, whose reason reaches the peer first. Call it after the proof, and close `channel` yourself afterwards.
+
+## `coqui_agentic_peer::peers`
+
+```rust
+pub struct PeerRecord { pub peer: String, pub claims: BTreeMap<String, String>, pub grants: BTreeSet<String> }  // non_exhaustive, Default
+pub fn PeerRecord::new(peer: &str) -> PeerRecord; pub fn PeerRecord::granting(self, protocol: &str) -> PeerRecord; pub fn PeerRecord::claiming(self, name: &str, value: &str) -> PeerRecord
+pub trait PeerStore: Send + Sync { fn get(&self, peer: &str) -> Result<Option<PeerRecord>, Error>; fn put(&self, record: &PeerRecord) -> Result<(), Error>; fn remove(&self, peer: &str) -> Result<(), Error>; }
+pub struct MemoryPeers;                              // Default; impl PeerStore
+pub fn FilePeers::new(path: impl Into<PathBuf>) -> FilePeers   // impl PeerStore; read on every question, so a grant from another process counts at once
+pub enum Event { LinkUp { peer }, LinkDown { peer }, Opened { peer, protocol }, Refused { peer, protocol }, Revoked { peer, protocol } }  // non_exhaustive; no payload, never a token or metadata
+pub trait Events: Send + Sync { fn event(&self, event: &Event); }
+pub struct NoEvents;                                 // impl Events
+```
+
+A host keeps peers in its own registry by implementing `PeerStore`, with no file, prompt or companion involved. `claims` are set by the host and never interpreted here: derive who is speaking from them, not from anything a peer says. Only keys, peers and grants need to survive a restart.
+
 ## `coqui_agentic_peer::home`
 
 ```rust
@@ -49,6 +83,7 @@ pub const HOME_ENV: &str = "COQUI_AGENTIC_PEER_HOME";
 pub fn dir() -> Option<PathBuf>                        // $COQUI_AGENTIC_PEER_HOME, or coqui-agentic-peer under %LOCALAPPDATA%, $XDG_CONFIG_HOME or ~/.config
 pub fn identity_path() -> Result<PathBuf, Error>
 pub fn store_path() -> Result<PathBuf, Error>
+pub fn grants_path() -> Result<PathBuf, Error>
 pub fn identity(path: Option<&Path>) -> Result<Identity, Error>    // this user's, or at path; made the first time it is needed
 pub fn store(path: Option<&Path>) -> Result<TrustStore, Error>     // this user's, or at path
 ```
@@ -66,7 +101,8 @@ pub fn prove<M: Method, C: Channel>(method: &M, channel: &C, limit: Duration, ma
 pub fn prove_out<M: Method, C: Channel>(method: &M, channel: &C, limit: Duration, max_message: usize) -> Result<Established<<M::Handshake as Handshake>::Output>, Error>
 pub struct Sealed<'a, C>;   // impl Channel
 pub fn Sealed::new(channel: &'a C, session: Session) -> Sealed<'a, C>
-pub fn Sealed::with_check(self, allowed: impl Fn() -> bool + Send + Sync + 'a) -> Sealed<'a, C>
+pub fn Sealed::with_check(self, allowed: impl Fn() -> bool + Send + Sync + 'a) -> Sealed<'a, C>   // a check that cannot tell must say no
+pub const fn Sealed::with_check_every(self, recheck: Duration) -> Sealed<'a, C>                    // a second unless set
 ```
 
 `create_identity` never replaces a file. `prove` answers and `prove_out` connects, within `limit`, refusing a message over 3072 bytes, and set the channel's limit to `max_message` before the proof's last message goes out. `Sealed` takes WebCrypto's `Session` today.
@@ -88,7 +124,7 @@ pub const SERVICE_TYPE: &str = "_acp-agent._tcp.local.";
 pub const DEFAULT_PATH: &str = "/acp";
 pub const DESCRIPTORS_ENV: &str = "COQUI_ACP_DESCRIPTORS";
 pub const MAX_CANDIDATES: usize = 64;
-pub struct Candidate { pub label: String, pub url: String, pub peer: Option<String>, pub source: Source, pub webtransport: Option<u16>, pub webtransport_hash: Option<String>, pub acp_versions: Vec<u32> }  // non_exhaustive
+pub struct Candidate { pub label: String, pub url: String, pub peer: Option<String>, pub source: Source, pub webtransport: Option<u16>, pub webtransport_hash: Option<String>, pub acp_versions: Vec<u32>, pub offers: Vec<String> }  // non_exhaustive
 pub enum Source { Network, ThisMachine }  // non_exhaustive
 pub fn Candidate::to_json(&self) -> Value
 pub fn Advertisement::new(label: &str, tls: bool) -> Result<Advertisement, Error>
@@ -96,6 +132,7 @@ pub fn Advertisement::with_peer(self, peer: Option<String>) -> Advertisement
 pub const fn Advertisement::with_webtransport(self, port: Option<u16>) -> Advertisement
 pub fn Advertisement::with_webtransport_hash(self, hash: Option<String>) -> Advertisement
 pub fn Advertisement::with_host(self, host: Option<String>) -> Result<Advertisement, Error>
+pub fn Advertisement::with_offers(self, offers: &[String]) -> Advertisement   // a hint, at most 16; the link's own document decides
 pub fn advertise(advertisement: &Advertisement, bound: SocketAddr) -> Result<Advertised, Error>   // withdrawn on drop
 pub fn discover(wait: Duration) -> Vec<Candidate>                 // descriptors, then the link; a failed mDNS start leaves the descriptors
 pub fn browse(wait: Duration) -> Result<Vec<Candidate>, Error>    // the link only

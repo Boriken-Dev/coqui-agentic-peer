@@ -52,6 +52,15 @@ pub fn store_path() -> Result<PathBuf, Error> {
     inside("peers")
 }
 
+/// The file of this user's grants, which [`crate::peers::FilePeers`] reads.
+///
+/// # Errors
+///
+/// [`Error::Identity`] when no directory can be worked out for this user.
+pub fn grants_path() -> Result<PathBuf, Error> {
+    inside("grants.json")
+}
+
 /// The identity at `path`, or this user's, made the first time it is needed. Parent directories are created.
 ///
 /// # Errors

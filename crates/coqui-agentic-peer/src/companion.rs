@@ -316,6 +316,7 @@ mod tests {
             webtransport: Some(65535),
             webtransport_hash: Some(format!("sha256:{}", "0".repeat(64))),
             acp_versions: vec![u32::MAX; 8],
+            offers: vec!["x".repeat(64); 16],
         };
         let reply = reply_with(&vec![big; discovery::MAX_CANDIDATES + 1]);
         assert!(reply.len() <= MAX_REPLY, "{}", reply.len());

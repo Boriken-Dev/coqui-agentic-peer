@@ -33,6 +33,7 @@ const MAX_HOST: usize = 253;
 /// A URL once parsing has percent-encoded it, which can triple a path.
 const MAX_URL: usize = 512;
 const MAX_VERSIONS: usize = 8;
+const MAX_OFFERS: usize = 16;
 /// Directory entries looked at in one search, whatever else is in the directory.
 const MAX_DESCRIPTOR_FILES: usize = 256;
 const MAX_DESCRIPTOR_BYTES: u64 = 8 * 1024;
@@ -79,6 +80,8 @@ pub struct Candidate {
     pub webtransport_hash: Option<String>,
     /// ACP versions it claims.
     pub acp_versions: Vec<u32>,
+    /// Protocol tokens it says it serves over one link. A hint: what a peer may open is what the link's own document says.
+    pub offers: Vec<String>,
 }
 
 impl Candidate {
@@ -93,6 +96,7 @@ impl Candidate {
             "webtransport": self.webtransport,
             "webtransportHash": self.webtransport_hash,
             "acpVersions": self.acp_versions,
+            "offers": self.offers,
         })
     }
 }
@@ -113,6 +117,8 @@ pub struct Advertisement {
     pub webtransport_hash: Option<String>,
     /// A host name to publish, for a certificate a browser accepts. Without it, clients get an address.
     pub host: Option<String>,
+    /// Protocol tokens served over one link. It tells the link what runs here, so list only what the operator means to say.
+    pub offers: Vec<String>,
 }
 
 impl Advertisement {
@@ -133,6 +139,7 @@ impl Advertisement {
             webtransport: None,
             webtransport_hash: None,
             host: None,
+            offers: Vec::new(),
         })
     }
 
@@ -147,6 +154,18 @@ impl Advertisement {
     #[must_use]
     pub const fn with_webtransport(mut self, port: Option<u16>) -> Self {
         self.webtransport = port;
+        self
+    }
+
+    /// The protocol tokens to say this serves, leaving out what could not go in a record.
+    #[must_use]
+    pub fn with_offers(mut self, offers: &[String]) -> Self {
+        self.offers = offers
+            .iter()
+            .filter(|offer| crate::mux::valid_protocol(offer))
+            .take(MAX_OFFERS)
+            .cloned()
+            .collect();
         self
     }
 
@@ -188,6 +207,9 @@ impl Advertisement {
         }
         if let Some(peer) = &self.peer {
             txt.insert("peer".to_owned(), peer.clone());
+        }
+        if !self.offers.is_empty() {
+            txt.insert("offers".to_owned(), self.offers.join(","));
         }
         txt
     }
@@ -237,6 +259,15 @@ fn clean_path(raw: Option<&str>) -> Option<String> {
             .bytes()
             .all(|byte| byte.is_ascii_graphic() && byte != b'#');
     fine.then(|| path.to_owned())
+}
+
+fn clean_offers(raw: Option<&str>) -> Vec<String> {
+    raw.unwrap_or("")
+        .split(',')
+        .filter(|offer| crate::mux::valid_protocol(offer))
+        .take(MAX_OFFERS)
+        .map(str::to_owned)
+        .collect()
 }
 
 fn clean_versions(raw: Option<&str>) -> Vec<u32> {
@@ -351,6 +382,7 @@ pub fn candidate_from(record: &Record<'_>) -> Option<Candidate> {
             .filter(|port| *port != 0),
         webtransport_hash: clean_peer(txt("wth")),
         acp_versions: clean_versions(txt("acpv")),
+        offers: clean_offers(txt("offers")),
     })
 }
 
@@ -435,6 +467,7 @@ fn candidate_from_descriptor(text: &str) -> Option<Candidate> {
             .filter(|port| *port != 0),
         webtransport_hash: clean_peer(value.get("wth").and_then(Value::as_str)),
         acp_versions: clean_versions(value.get("acpv").and_then(Value::as_str)),
+        offers: clean_offers(value.get("offers").and_then(Value::as_str)),
     })
 }
 
@@ -682,6 +715,7 @@ fn write_descriptor(advertisement: &Advertisement, bound: SocketAddr) -> Result<
         "peer": advertisement.peer,
         "wt": advertisement.webtransport,
         "wth": advertisement.webtransport_hash,
+        "offers": (!advertisement.offers.is_empty()).then(|| advertisement.offers.join(",")),
     })
     .to_string();
     let name = format!("{}-{}", std::process::id(), bound.port());
@@ -858,6 +892,36 @@ mod tests {
                 "{path}"
             );
         }
+    }
+
+    #[test]
+    fn offers_are_read_as_a_stranger_wrote_them() {
+        let many = (0..100)
+            .map(|n| format!("p{n}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let hostile = format!("acp/1,a b,,{}", "x".repeat(65));
+        let good = |offers: &str| {
+            let keys = [
+                ("txtvers", "1"),
+                ("proto", "acp"),
+                ("tls", "1"),
+                ("peer", PEER),
+                ("offers", offers),
+            ];
+            read("x", "h.local.", &["10.0.0.5"], 1, &keys)
+                .unwrap()
+                .offers
+        };
+        assert_eq!(good("acp/1,a2a/1,mcp"), ["acp/1", "a2a/1", "mcp"]);
+        assert_eq!(good(&hostile), ["acp/1"]);
+        assert_eq!(good(&many).len(), MAX_OFFERS);
+        assert_eq!(
+            read("x", "h.local.", &["10.0.0.5"], 1, GOOD)
+                .unwrap()
+                .offers,
+            Vec::<String>::new()
+        );
     }
 
     #[test]

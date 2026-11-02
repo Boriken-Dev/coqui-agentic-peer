@@ -62,6 +62,18 @@ Each way a stream ends is its own, so a host can tell what to do next: closed in
 
 Optional, off unless set, at link level. A side sends `ping` every interval, and `pong` answers any `ping`. A side that has heard nothing at all for its interval times its allowed misses treats the link as lost. A stream silent for hours is not affected, since a link with live peers answers whatever its streams are doing. Set the interval under a reverse proxy's read timeout, which it also keeps from closing an idle link.
 
+## What a link offers
+
+Any admitted peer may open `link/1`. The other side answers with one JSON message and finishes:
+
+```json
+{ "version": 1, "instance": "9f2c…", "peer": "sha256:…", "offers": ["acp/1", "mcp"] }
+```
+
+`offers` is what this peer may open there now, which is authoritative where a DNS-SD record's `offers` is only a hint. `instance` is random per process, so a peer seeing a different one after a drop knows the other side restarted and lost what it held, as against a blip.
+
+A key is one entry in one store, so a new capability is a grant on that entry and never another pairing. Each open is decided against the grants, and each running stream again at an interval the host sets. A grant taken away ends its stream with `revoked`. A store that cannot be read refuses, so nothing fails open.
+
 ## Flow control
 
 Each direction of each stream starts with a window of credit, 1 MiB by default. Sending a message costs its size in credit. A sender MAY start a message only while its credit is above zero, so a message larger than the window still passes, one at a time. A receiver returns credit as the application reads, not as the link delivers.

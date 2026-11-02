@@ -136,6 +136,7 @@ pub struct Sealed<'a, C: Channel> {
     opener: Mutex<Opener>,
     allowed: Option<Box<dyn Fn() -> bool + Send + Sync + 'a>>,
     checked: Mutex<Instant>,
+    recheck: Duration,
 }
 
 impl<C: Channel> core::fmt::Debug for Sealed<'_, C> {
@@ -158,13 +159,22 @@ impl<'a, C: Channel> Sealed<'a, C> {
             opener: Mutex::new(opener),
             allowed: None,
             checked: Mutex::new(Instant::now()),
+            recheck: RECHECK,
         }
     }
 
-    /// Ends the link within about a second once `allowed` says no, for a peer removed from a store while connected.
+    /// Ends the link within about a second once `allowed` says no, for a peer removed from a store while connected. A check that
+    /// cannot tell has to say no: a store that cannot be read must not keep a link alive.
     #[must_use]
     pub fn with_check(mut self, allowed: impl Fn() -> bool + Send + Sync + 'a) -> Self {
         self.allowed = Some(Box::new(allowed));
+        self
+    }
+
+    /// How often [`Sealed::with_check`] asks: a second unless set.
+    #[must_use]
+    pub const fn with_check_every(mut self, recheck: Duration) -> Self {
+        self.recheck = recheck;
         self
     }
 
@@ -173,7 +183,7 @@ impl<'a, C: Channel> Sealed<'a, C> {
             return true;
         };
         let mut checked = self.checked.lock().unwrap_or_else(PoisonError::into_inner);
-        if checked.elapsed() < RECHECK {
+        if checked.elapsed() < self.recheck {
             return true;
         }
         *checked = Instant::now();

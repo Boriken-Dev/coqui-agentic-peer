@@ -10,8 +10,10 @@ pub mod auth;
 pub mod companion;
 pub mod discovery;
 pub mod home;
+pub mod link;
 pub mod mux;
 pub mod pairing;
+pub mod peers;
 
 use core::fmt;
 
