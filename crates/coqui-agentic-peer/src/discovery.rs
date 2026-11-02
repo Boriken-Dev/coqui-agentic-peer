@@ -403,7 +403,7 @@ pub fn descriptors_dir() -> Option<PathBuf> {
     Some(base.join("coqui-acp").join("agents"))
 }
 
-fn create_private_dir(dir: &Path) -> io::Result<()> {
+pub(crate) fn create_private_dir(dir: &Path) -> io::Result<()> {
     let mut builder = std::fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]

@@ -87,13 +87,13 @@ A stream's data frames are the connection's bytes in order, with no framing of t
 `mcp-offer/1` lets a peer serve its own MCP tools to a program on the side it opened the stream to, typically an agent that side started. ACP requires every agent to take a stdio MCP server, so that is what the peer is given: the opener may put a server name in the metadata (ASCII letters, digits, `-` and `_`, up to 64 bytes), and the first message on the stream is one entry for `mcpServers`:
 
 ```json
-{ "name": "canoa-browser", "command": "/abs/path/coqui-acp-bridge", "args": ["mcp-shim"],
-  "env": [{ "name": "COQUI_MCP_OFFER_ADDRESS", "value": "127.0.0.1:50123" }, { "name": "COQUI_MCP_OFFER_TOKEN", "value": "…" }] }
+{ "type": "stdio", "name": "canoa-browser", "command": "/abs/path/coqui-acp-bridge", "args": ["mcp-shim"],
+  "env": [{ "name": "COQUI_MCP_OFFER_ADDRESS", "value": "127.0.0.1:50123" }, { "name": "COQUI_MCP_OFFER_TOKEN_FILE", "value": "/home/me/.config/coqui-agentic-peer/offers/….token" }] }
 ```
 
-The peer declares that entry to its agent. The program it names connects to the address, which is a loopback port made for this stream, and sends the token and a line feed. From then on each line it carries is one message on the stream, both ways: MCP's own stdio messages, unchanged. A stream message holding a line break ends that connection, since it would forge a second line. Something without the token gets nothing, and a program that ends its server may connect again.
+The peer declares that entry to its agent. The program it names reads the token from that file, connects to the address, which is a loopback port made for this stream, and sends the token and a line feed. From then on each line it carries is one message on the stream, both ways: MCP's own stdio messages, unchanged. A stream message holding a line break ends that connection, since it would forge a second line. Something without the token gets nothing, and a program that ends its server may connect again.
 
-The token is 256 random bits and travels in the environment, not in arguments, since another user can read a process's arguments. The port and token last as long as the stream, so revoking the grant or losing the link ends them, and the program's connection with them. This is not HTTP, so a web page that fires a request at the port can neither pass the first line nor read an answer.
+The token is 256 random bits, in a file in a directory only this user can read, and the entry only names the file. Agents have been seen to pass an entry's environment to a program in its arguments, which another user on the machine can read, so a secret in the entry would be a secret in the process list. It follows that the program has to run as this user. The port and token last as long as the stream, so revoking the grant where it can be revoked, or losing the link, ends them and the program's connection with them. Something that connected has two seconds in all to show the token, and nothing waiting to show one keeps anything else out. This is not HTTP, so a web page that fires a request at the port can neither pass the first line nor read an answer.
 
 A grant on `acp/1` already lets a peer declare any stdio command to its agent. `mcp-offer/1` adds a way to reach the peer's tools from that command, and nothing else.
 

@@ -47,15 +47,15 @@ pub fn Stream::end(&self) -> Option<StreamEnd>
 ```rust
 pub const OFFER_PROTOCOL: &str = "mcp-offer/1";
 pub const ADDRESS_VARIABLE: &str = "COQUI_MCP_OFFER_ADDRESS";
-pub const TOKEN_VARIABLE: &str = "COQUI_MCP_OFFER_TOKEN";
-pub fn handler(command: PathBuf, args: Vec<String>) -> link::Handler      // what Services::with takes; command is absolute and starts shim
+pub const TOKEN_FILE_VARIABLE: &str = "COQUI_MCP_OFFER_TOKEN_FILE";
+pub fn handler(command: PathBuf, args: Vec<String>, tokens: PathBuf) -> link::Handler      // what Services::with takes; command is absolute and starts shim; tokens is made private and holds one file per offer
 pub fn shim(input: impl Read + Send + 'static, output: impl Write) -> Result<(), ShimError>   // the stdio server, from its environment
 pub enum ShimError { Setting(&'static str), Io(io::Error) }  // non_exhaustive
 ```
 
 - A peer opens the stream, with a server name in `metadata` or none, and its first message is a stdio `mcpServers` entry to declare to its agent. Lines the shim carries are then that stream's messages, both ways. The wire is in `docs/link.md`.
 - The shim refuses an address off this machine, so the token goes nowhere else. It returns when either end stops; call it with standard input and output, and exit.
-- The port and token last as long as the stream.
+- The port, the token and its file last as long as the stream. The entry holds no secret, since an agent may pass its environment to a program in arguments another user can read. What it starts has to run as the user who can read that file.
 
 ## `coqui_agentic_peer::link`
 

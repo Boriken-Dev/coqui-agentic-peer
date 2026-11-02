@@ -1,13 +1,14 @@
 //! A peer serving its own MCP tools to a program on this machine, which starts a stdio server because every agent can: `mcp-offer/1`.
 //!
-//! The peer opens a stream and is answered with one stdio `mcpServers` entry, which runs [`shim`]. The shim shows the token it was
-//! given, and from then on the lines it carries are MCP's own, relayed to that stream. No HTTP server exists for a web page to reach,
-//! and the port and its token last as long as the stream.
+//! The peer opens a stream and is answered with one stdio `mcpServers` entry, which runs [`shim`]. The shim shows the token in a file
+//! only this user can read, and from then on the lines it carries are MCP's own, relayed to that stream. No HTTP server exists for a
+//! web page to reach, and the port and its token last as long as the stream.
 
 use std::env;
+use std::fs;
 use std::io::{self, BufRead as _, BufReader, ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -22,8 +23,9 @@ use crate::mux::{CloseReason, LinkStream, StreamLife};
 pub const OFFER_PROTOCOL: &str = "mcp-offer/1";
 /// Where the shim connects.
 pub const ADDRESS_VARIABLE: &str = "COQUI_MCP_OFFER_ADDRESS";
-/// What the shim shows. In the environment, since another user can read a process's arguments.
-pub const TOKEN_VARIABLE: &str = "COQUI_MCP_OFFER_TOKEN";
+/// The file holding what the shim shows. The entry names it and never holds the token: an agent may pass an entry's environment to
+/// a program in its arguments, which another user on the machine can read.
+pub const TOKEN_FILE_VARIABLE: &str = "COQUI_MCP_OFFER_TOKEN_FILE";
 /// The server's name when the peer opens with none.
 const DEFAULT_NAME: &str = "peer-tools";
 const MAX_NAME: usize = 64;
@@ -31,18 +33,75 @@ const MAX_NAME: usize = 64;
 const MAX_LINE: usize = 16 * 1024 * 1024;
 const TOKEN_BYTES: usize = 32;
 const POLL: Duration = Duration::from_millis(50);
-/// How long something that connected may take to show the token, during which nothing else is served.
+/// How long something that connected has to show the token, in all.
 const TOKEN_WAIT: Duration = Duration::from_secs(2);
+/// As many waiting to show one: past this the longest waiting goes, so nothing local can keep a real shim out by connecting.
+const MAX_KNOCKING: usize = 16;
+/// A token file a crash left behind goes after this, and by then its port has long gone.
+const STALE: Duration = Duration::from_secs(24 * 60 * 60);
+const TOKEN_SUFFIX: &str = "token";
 /// How long a line may wait on an agent that stopped reading, or on a peer whose stream is full.
 const STUCK: Duration = Duration::from_secs(30);
 
-/// Serves `mcp-offer/1`. `command` and `args` start [`shim`], and `command` has to be absolute, as ACP says of a stdio server.
-pub fn handler(command: PathBuf, args: Vec<String>) -> Handler {
+/// Serves `mcp-offer/1`. `command` and `args` start [`shim`], and `command` has to be absolute, as ACP says of a stdio server. Token
+/// files go in `tokens`, which is made private to this user, so whatever the entry starts has to run as this user too.
+pub fn handler(command: PathBuf, args: Vec<String>, tokens: PathBuf) -> Handler {
     Box::new(move |stream: &dyn LinkStream, accepted: &Accepted| {
-        if let Err(why) = offer(stream, &command, &args, &accepted.metadata) {
+        if let Err(why) = offer(stream, &command, &args, &tokens, &accepted.metadata) {
             stream.close_with(CloseReason::Refused, why);
         }
     })
+}
+
+/// A token on disk, for as long as the offer it opens.
+struct TokenFile(PathBuf);
+
+impl TokenFile {
+    fn create(dir: &Path, token: &str) -> Result<Self, &'static str> {
+        let refused = |_| "the token could not be stored";
+        crate::discovery::create_private_dir(dir).map_err(refused)?;
+        forget_stale(dir);
+        let path = dir.join(format!("{}.{TOKEN_SUFFIX}", new_token()?));
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&path).map_err(refused)?;
+        let kept = Self(path);
+        file.write_all(token.as_bytes()).map_err(refused)?;
+        Ok(kept)
+    }
+}
+
+impl Drop for TokenFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+fn forget_stale(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let old = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age > STALE);
+        if old
+            && path
+                .extension()
+                .is_some_and(|extension| extension == TOKEN_SUFFIX)
+        {
+            let _ = fs::remove_file(path);
+        }
+    }
 }
 
 /// A name the agent can put in front of a tool's: a peer picks it, and it goes into what the agent shows and what its model reads.
@@ -72,8 +131,9 @@ fn new_token() -> Result<String, &'static str> {
 
 fn offer(
     stream: &dyn LinkStream,
-    command: &std::path::Path,
+    command: &Path,
     args: &[String],
+    tokens: &Path,
     metadata: &[u8],
 ) -> Result<(), &'static str> {
     let name = server_name(metadata)?;
@@ -83,52 +143,101 @@ fn offer(
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(refused)?;
     listener.set_nonblocking(true).map_err(refused)?;
     let address = listener.local_addr().map_err(refused)?;
+    let file = TokenFile::create(tokens, &token)?;
+    let path = file.0.to_str().ok_or("the token's path is not text")?;
+    // ACP v2 needs the type, and v1 takes it.
     let entry = json!({
+        "type": "stdio",
         "name": name,
         "command": command,
         "args": args,
         "env": [
             { "name": ADDRESS_VARIABLE, "value": address.to_string() },
-            { "name": TOKEN_VARIABLE, "value": token },
+            { "name": TOKEN_FILE_VARIABLE, "value": path },
         ],
     });
     if stream.send(entry.to_string().as_bytes()).is_err() {
         return Ok(());
     }
+    let mut knocking: Vec<Knock> = Vec::new();
     while stream.life() == StreamLife::Open {
-        match listener.accept() {
-            Ok((connection, _)) => {
-                if showed_token(&connection, &token) {
-                    // Over when the agent ends its server, which it may start again, and the stream is still there for that.
-                    relay(&connection, stream);
-                }
+        if let Ok((connection, _)) = listener.accept()
+            && connection.set_nonblocking(true).is_ok()
+        {
+            if knocking.len() >= MAX_KNOCKING {
+                knocking.remove(0);
             }
-            // Nothing waiting, or a connection that failed before it was taken: either way, look again.
-            Err(_) => thread::sleep(POLL),
+            knocking.push(Knock {
+                connection,
+                shown: Vec::with_capacity(token.len() + 1),
+                since: Instant::now(),
+            });
         }
+        let mut shown = None;
+        knocking.retain_mut(|knock| match knock.read(&token) {
+            Knocked::Waiting => true,
+            Knocked::Wrong => false,
+            Knocked::Right => {
+                if shown.is_none() {
+                    shown = Some(knock.connection.try_clone());
+                }
+                false
+            }
+        });
+        // Over when the agent ends its server, which it may start again, and the stream is still there for that.
+        if let Some(Ok(connection)) = shown
+            && connection.set_nonblocking(false).is_ok()
+        {
+            relay(&connection, stream);
+        }
+        thread::sleep(POLL);
     }
     Ok(())
 }
 
-/// Reads only as far as the first line, which is all anything without the token gets to send.
-fn showed_token(connection: &TcpStream, token: &str) -> bool {
-    if connection.set_nonblocking(false).is_err()
-        || connection.set_read_timeout(Some(TOKEN_WAIT)).is_err()
-    {
-        return false;
+/// Something that connected and has not yet shown the token. One slow connection holds up nobody: each is read without waiting, and
+/// has [`TOKEN_WAIT`] in all.
+struct Knock {
+    connection: TcpStream,
+    shown: Vec<u8>,
+    since: Instant,
+}
+
+enum Knocked {
+    Waiting,
+    Wrong,
+    Right,
+}
+
+impl Knock {
+    /// Reads only as far as the first line, which is all anything without the token gets to send.
+    fn read(&mut self, token: &str) -> Knocked {
+        let wanted = token.len() + 1;
+        let mut buffer = [0_u8; 128];
+        while self.shown.len() < wanted {
+            let room = (wanted - self.shown.len()).min(buffer.len());
+            match (&self.connection).read(&mut buffer[..room]) {
+                Ok(0) => return Knocked::Wrong,
+                Ok(count) => self.shown.extend_from_slice(&buffer[..count]),
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                    return if self.since.elapsed() < TOKEN_WAIT {
+                        Knocked::Waiting
+                    } else {
+                        Knocked::Wrong
+                    };
+                }
+                Err(_) => return Knocked::Wrong,
+            }
+        }
+        let same = self.shown.pop() == Some(b'\n')
+            && self
+                .shown
+                .iter()
+                .zip(token.as_bytes())
+                .fold(0, |differs, (a, b)| differs | (a ^ b))
+                == 0;
+        if same { Knocked::Right } else { Knocked::Wrong }
     }
-    let mut shown = Vec::with_capacity(token.len() + 1);
-    let mut limited = connection.take((token.len() + 1) as u64);
-    if limited.read_to_end(&mut shown).is_err() {
-        return false;
-    }
-    shown.len() == token.len() + 1
-        && shown.pop() == Some(b'\n')
-        && shown
-            .iter()
-            .zip(token.as_bytes())
-            .fold(0, |differs, (a, b)| differs | (a ^ b))
-            == 0
 }
 
 /// One line at a time from something that may time out between its parts, keeping what it has read.
@@ -281,9 +390,10 @@ impl std::error::Error for ShimError {}
 pub fn shim(input: impl Read + Send + 'static, output: impl Write) -> Result<(), ShimError> {
     let address = env::var(ADDRESS_VARIABLE)
         .map_err(|_| ShimError::Setting("no address in the environment"))?;
-    let token =
-        env::var(TOKEN_VARIABLE).map_err(|_| ShimError::Setting("no token in the environment"))?;
-    shim_to(&address, &token, input, output)
+    let file = env::var_os(TOKEN_FILE_VARIABLE)
+        .ok_or(ShimError::Setting("no token file in the environment"))?;
+    let token = fs::read_to_string(file).map_err(ShimError::Io)?;
+    shim_to(&address, token.trim(), input, output)
 }
 
 fn shim_to(
@@ -354,6 +464,27 @@ mod tests {
     const WAIT: Duration = Duration::from_secs(10);
     const PEER: &str = "sha256:peer";
 
+    /// A directory of a test's own, removed with it.
+    struct Tokens(PathBuf);
+
+    impl Tokens {
+        fn new() -> Self {
+            static NEXT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+            let name = format!(
+                "coqui-mcp-offer-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::SeqCst)
+            );
+            Self(env::temp_dir().join(name))
+        }
+    }
+
+    impl Drop for Tokens {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
     struct Wire {
         out: Mutex<Option<mpsc::Sender<Vec<u8>>>>,
         incoming: Mutex<mpsc::Receiver<Vec<u8>>>,
@@ -410,9 +541,14 @@ mod tests {
         store
             .put(&PeerRecord::new(PEER).granting(OFFER_PROTOCOL))
             .unwrap();
+        let tokens = Tokens::new();
         let services = Services::default().with(
             OFFER_PROTOCOL,
-            handler(PathBuf::from("/abs/program"), vec!["mcp-shim".to_owned()]),
+            handler(
+                PathBuf::from("/abs/program"),
+                vec!["mcp-shim".to_owned()],
+                tokens.0.clone(),
+            ),
         );
         thread::scope(|scope| {
             let (near, store_ref, services) = (&near, &store, &services);
@@ -443,6 +579,7 @@ mod tests {
     struct Offered {
         address: String,
         token: String,
+        file: PathBuf,
         entry: Value,
     }
 
@@ -458,7 +595,8 @@ mod tests {
         };
         Offered {
             address: value(ADDRESS_VARIABLE),
-            token: value(TOKEN_VARIABLE),
+            token: fs::read_to_string(value(TOKEN_FILE_VARIABLE)).unwrap(),
+            file: PathBuf::from(value(TOKEN_FILE_VARIABLE)),
             entry,
         }
     }
@@ -480,15 +618,16 @@ mod tests {
     }
 
     #[test]
-    fn an_entry_is_a_stdio_server_whose_token_is_not_in_its_arguments() {
+    fn an_entry_is_a_stdio_server_that_holds_no_token_anywhere() {
         with_link(|mux, _| {
             let stream = mux.open_with(OFFER_PROTOCOL, b"canoa-browser").unwrap();
             let offered = read_entry(&stream);
+            assert_eq!(offered.entry["type"], "stdio");
             assert_eq!(offered.entry["name"], "canoa-browser");
             assert_eq!(offered.entry["command"], "/abs/program");
             assert_eq!(offered.entry["args"], json!(["mcp-shim"]));
             assert_eq!(offered.token.len(), TOKEN_BYTES * 2);
-            assert!(!offered.entry["args"].to_string().contains(&offered.token));
+            assert!(!offered.entry.to_string().contains(&offered.token));
             let address: SocketAddr = offered.address.parse().unwrap();
             assert!(address.ip().is_loopback());
         });
@@ -569,6 +708,70 @@ mod tests {
             stream.receive(Some(WAIT)).unwrap();
             stream.send(b"{\"a\":1}\n{\"forged\":true}").unwrap();
             assert_eq!(line_from(&shim), "");
+        });
+    }
+
+    #[test]
+    fn a_connection_dripping_bytes_or_saying_nothing_keeps_nobody_out() {
+        with_link(|mux, _| {
+            let stream = mux.open(OFFER_PROTOCOL).unwrap();
+            let offered = read_entry(&stream);
+            let silent: Vec<TcpStream> = (0..MAX_KNOCKING + 4)
+                .map(|_| TcpStream::connect(&offered.address).unwrap())
+                .collect();
+            let mut dripping = TcpStream::connect(&offered.address).unwrap();
+            dripping.write_all(b"0").unwrap();
+            let started = Instant::now();
+            let mut shim = TcpStream::connect(&offered.address).unwrap();
+            writeln!(shim, "{}", offered.token).unwrap();
+            shim.write_all(b"{\"id\":1}\n").unwrap();
+            assert_eq!(stream.receive(Some(WAIT)).unwrap().unwrap(), b"{\"id\":1}");
+            assert!(started.elapsed() < TOKEN_WAIT, "{:?}", started.elapsed());
+            drop(silent);
+        });
+    }
+
+    #[test]
+    fn showing_it_slowly_has_a_limit_in_all() {
+        with_link(|mux, _| {
+            let stream = mux.open(OFFER_PROTOCOL).unwrap();
+            let offered = read_entry(&stream);
+            let mut slow = TcpStream::connect(&offered.address).unwrap();
+            for byte in offered.token.as_bytes() {
+                if slow.write_all(&[*byte]).is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+            let _ = writeln!(slow);
+            let _ = slow.write_all(b"{\"late\":true}\n");
+            assert!(matches!(
+                stream.receive(Some(Duration::from_millis(300))),
+                Err(Failure::Timeout)
+            ));
+        });
+    }
+
+    #[test]
+    fn the_token_file_goes_with_the_stream_and_only_this_user_can_read_it() {
+        with_link(|mux, _| {
+            let stream = mux.open(OFFER_PROTOCOL).unwrap();
+            let offered = read_entry(&stream);
+            assert!(offered.file.is_file());
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                let mode = fs::metadata(&offered.file).unwrap().permissions().mode();
+                assert_eq!(mode & 0o077, 0, "{mode:o}");
+                let dir = fs::metadata(offered.file.parent().unwrap()).unwrap();
+                assert_eq!(dir.permissions().mode() & 0o077, 0);
+            }
+            stream.close();
+            let until = Instant::now() + WAIT;
+            while offered.file.exists() {
+                assert!(Instant::now() < until, "the file stayed");
+                thread::sleep(POLL);
+            }
         });
     }
 
