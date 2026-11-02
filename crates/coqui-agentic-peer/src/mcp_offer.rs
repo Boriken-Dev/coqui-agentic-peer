@@ -33,6 +33,9 @@ const MAX_NAME: usize = 64;
 const MAX_LINE: usize = 16 * 1024 * 1024;
 const TOKEN_BYTES: usize = 32;
 const POLL: Duration = Duration::from_millis(50);
+/// How long [`relay`] waits between looks at a socket with nothing to read or no room to write. The socket is non-blocking and has no
+/// timeout of its own: a receive timeout can fail on Windows just as data arrives, which reads as the connection ending.
+const RELAY_POLL: Duration = Duration::from_millis(5);
 /// How long something that connected has to show the token, in all.
 const TOKEN_WAIT: Duration = Duration::from_secs(2);
 /// As many waiting to show one: past this the longest waiting goes, so nothing local can keep a real shim out by connecting.
@@ -187,9 +190,7 @@ fn offer(
             }
         });
         // Over when the agent ends its server, which it may start again, and the stream is still there for that.
-        if let Some(Ok(connection)) = shown
-            && connection.set_nonblocking(false).is_ok()
-        {
+        if let Some(Ok(connection)) = shown {
             relay(&connection, stream);
         }
         thread::sleep(POLL);
@@ -305,9 +306,7 @@ impl<R: Read> Lines<R> {
 
 /// Lines both ways until the connection or the stream ends. A message is one line, so one with a line break in it would forge another.
 fn relay(connection: &TcpStream, stream: &dyn LinkStream) {
-    if connection.set_read_timeout(Some(POLL)).is_err()
-        || connection.set_write_timeout(Some(STUCK)).is_err()
-    {
+    if connection.set_nonblocking(true).is_err() {
         return;
     }
     let stop = AtomicBool::new(false);
@@ -323,19 +322,17 @@ fn relay(connection: &TcpStream, stream: &dyn LinkStream) {
                             break;
                         }
                     }
-                    NextLine::Nothing => {}
+                    NextLine::Nothing => thread::sleep(RELAY_POLL),
                     NextLine::Ended | NextLine::TooLong => break,
                 }
             }
             stop.store(true, Ordering::SeqCst);
         });
-        let mut writer = connection;
         while !stop.load(Ordering::SeqCst) {
             match stream.receive(Some(POLL)) {
                 Ok(Some(message)) => {
                     let written = !message.iter().any(|byte| matches!(byte, b'\n' | b'\r'))
-                        && writer.write_all(&message).is_ok()
-                        && writer.write_all(b"\n").is_ok();
+                        && write_line(connection, &message, stop);
                     if !written {
                         break;
                     }
@@ -347,6 +344,34 @@ fn relay(connection: &TcpStream, stream: &dyn LinkStream) {
         stop.store(true, Ordering::SeqCst);
     });
     let _ = connection.shutdown(std::net::Shutdown::Both);
+}
+
+/// One line to a non-blocking socket, all of it or `false`: a partial write goes on from where it stopped, and an agent that takes
+/// nothing for [`STUCK`] has stopped reading.
+fn write_line(mut connection: &TcpStream, message: &[u8], stop: &AtomicBool) -> bool {
+    let mut line = Vec::with_capacity(message.len() + 1);
+    line.extend_from_slice(message);
+    line.push(b'\n');
+    let mut done = 0;
+    let mut moved = Instant::now();
+    while done < line.len() {
+        match connection.write(&line[done..]) {
+            Ok(0) => return false,
+            Ok(count) => {
+                done += count;
+                moved = Instant::now();
+            }
+            Err(error) if error.kind() == ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                if moved.elapsed() >= STUCK || stop.load(Ordering::SeqCst) {
+                    return false;
+                }
+                thread::sleep(RELAY_POLL);
+            }
+            Err(_) => return false,
+        }
+    }
+    true
 }
 
 fn deliver(stream: &dyn LinkStream, line: &[u8], stop: &AtomicBool) -> bool {
@@ -897,5 +922,116 @@ mod tests {
         assert!(matches!(lines.next(), NextLine::Line(line) if line == b"one"));
         assert!(matches!(lines.next(), NextLine::Line(line) if line == b"two"));
         assert!(matches!(lines.next(), NextLine::Ended));
+    }
+
+    /// A stream with nothing behind it but two queues, to run [`relay`] alone.
+    struct Queues {
+        to_agent: Mutex<mpsc::Receiver<Vec<u8>>>,
+        from_agent: Mutex<mpsc::Sender<Vec<u8>>>,
+    }
+
+    impl Channel for Queues {
+        fn send(&self, message: &[u8]) -> Result<(), Failure> {
+            self.from_agent
+                .lock()
+                .unwrap()
+                .send(message.to_vec())
+                .map_err(|_| Failure::PathLost)
+        }
+
+        fn receive(&self, timeout: Option<Duration>) -> Result<Option<Vec<u8>>, Failure> {
+            match self
+                .to_agent
+                .lock()
+                .unwrap()
+                .recv_timeout(timeout.unwrap_or(WAIT))
+            {
+                Ok(message) => Ok(Some(message)),
+                Err(mpsc::RecvTimeoutError::Timeout) => Err(Failure::Timeout),
+                Err(mpsc::RecvTimeoutError::Disconnected) => Ok(None),
+            }
+        }
+
+        fn close(&self) {}
+    }
+
+    impl LinkStream for Queues {
+        fn life(&self) -> StreamLife {
+            StreamLife::Open
+        }
+
+        fn finish(&self) -> Result<(), Failure> {
+            Ok(())
+        }
+
+        fn close_with(&self, _: CloseReason, _: &str) {}
+    }
+
+    /// `relay` on one end of a loopback connection, `body` given the other end, the queues' ends and the relay's own socket.
+    fn relaying(
+        body: impl FnOnce(&TcpStream, &mpsc::Sender<Vec<u8>>, &mpsc::Receiver<Vec<u8>>, &TcpStream),
+    ) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (served, _) = listener.accept().unwrap();
+        let (to_agent, agent_in) = mpsc::channel();
+        let (agent_out, from_agent) = mpsc::channel();
+        let queues = Queues {
+            to_agent: Mutex::new(agent_in),
+            from_agent: Mutex::new(agent_out),
+        };
+        thread::scope(|scope| {
+            scope.spawn(|| relay(&served, &queues));
+            body(&client, &to_agent, &from_agent, &served);
+            // Ends the relay, which looks at the connection and at its stream.
+            let _ = client.shutdown(std::net::Shutdown::Both);
+            drop(to_agent);
+        });
+    }
+
+    #[test]
+    fn the_relay_polls_by_looking_and_not_by_a_socket_timeout() {
+        relaying(|client, _, from_agent, served| {
+            (&*client).write_all(b"{\"id\":1}\n").unwrap();
+            assert_eq!(from_agent.recv_timeout(WAIT).unwrap(), b"{\"id\":1}");
+            // A receive timeout can fail with an error that reads as the end of the connection.
+            assert_eq!(served.read_timeout().unwrap(), None);
+            assert_eq!(served.write_timeout().unwrap(), None);
+        });
+    }
+
+    #[test]
+    fn a_line_arriving_in_pieces_with_gaps_is_one_line() {
+        relaying(|client, _, from_agent, _| {
+            let mut client = client;
+            for piece in [&b"{\"a\":"[..], b"\"b", b"c\"", b"}\r", b"\n"] {
+                client.write_all(piece).unwrap();
+                client.flush().unwrap();
+                thread::sleep(Duration::from_millis(120));
+            }
+            assert_eq!(from_agent.recv_timeout(WAIT).unwrap(), b"{\"a\":\"bc\"}");
+        });
+    }
+
+    #[test]
+    fn a_line_bigger_than_the_socket_takes_arrives_whole_whatever_the_reader_does() {
+        relaying(|client, to_agent, _, _| {
+            let message: Vec<u8> = (0..6_000_000_u32)
+                .map(|at| b'a' + u8::try_from(at % 26).unwrap())
+                .collect();
+            to_agent.send(message.clone()).unwrap();
+            to_agent.send(b"next".to_vec()).unwrap();
+            // The reader starts late and takes it in small bites, so the writer meets a full socket again and again.
+            thread::sleep(Duration::from_millis(300));
+            client.set_read_timeout(Some(WAIT)).unwrap();
+            let mut lines = BufReader::with_capacity(4096, client);
+            let mut line = Vec::new();
+            lines.read_until(b'\n', &mut line).unwrap();
+            assert_eq!(line.pop(), Some(b'\n'));
+            assert!(line == message, "the line arrived whole");
+            line.clear();
+            lines.read_until(b'\n', &mut line).unwrap();
+            assert_eq!(line, b"next\n");
+        });
     }
 }
