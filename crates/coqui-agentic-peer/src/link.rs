@@ -234,6 +234,34 @@ pub fn serve_with<'c, C: Channel>(
             let live: Mutex<Vec<Live<'_, C>>> = Mutex::new(Vec::new());
             let mut checked = Instant::now();
             loop {
+                // Here rather than after an accept, so what a peer opens cannot put off its own revocation.
+                if checked.elapsed() >= options.recheck {
+                    checked = Instant::now();
+                    let mut held = live.lock().unwrap_or_else(PoisonError::into_inner);
+                    held.retain(|running| {
+                        if running.done.load(Ordering::SeqCst) {
+                            return false;
+                        }
+                        if decide(store, services, peer, &running.protocol, &running.metadata)
+                            .is_ok()
+                        {
+                            return true;
+                        }
+                        // Telling a peer whose link is full can take as long as the link allows, and this loop has others to watch.
+                        let stream = Arc::clone(&running.stream);
+                        scope.spawn(move || {
+                            stream.close_with(
+                                CloseReason::Revoked,
+                                "this peer may no longer use that",
+                            );
+                        });
+                        events.event(&Event::Revoked {
+                            peer: peer.to_owned(),
+                            protocol: running.protocol.clone(),
+                        });
+                        false
+                    });
+                }
                 match mux.accept(Some(ACCEPT_POLL)) {
                     Ok(Some(incoming)) => {
                         // A slow service holds up nothing here: each runs on its own thread, and this goes back to waiting.
@@ -292,25 +320,6 @@ pub fn serve_with<'c, C: Channel>(
                     }
                     Err(Failure::Timeout) => {}
                     Ok(None) | Err(_) => break,
-                }
-                if checked.elapsed() >= options.recheck {
-                    checked = Instant::now();
-                    let mut held = live.lock().unwrap_or_else(PoisonError::into_inner);
-                    held.retain(|running| !running.done.load(Ordering::SeqCst));
-                    for running in held.iter() {
-                        if decide(store, services, peer, &running.protocol, &running.metadata)
-                            .is_err()
-                        {
-                            running.stream.close_with(
-                                CloseReason::Revoked,
-                                "this peer may no longer use that",
-                            );
-                            events.event(&Event::Revoked {
-                                peer: peer.to_owned(),
-                                protocol: running.protocol.clone(),
-                            });
-                        }
-                    }
                 }
             }
             // The link has gone. What is still running hears that from its stream, and this scope waits for it.
@@ -743,5 +752,61 @@ mod tests {
         let channel = Prefilled::new(&ours, b"first".to_vec());
         assert_eq!(channel.receive(WAIT).unwrap().unwrap(), b"first");
         assert_eq!(channel.receive(WAIT).unwrap().unwrap(), b"second");
+    }
+
+    #[test]
+    fn opening_as_fast_as_it_can_does_not_put_off_a_revocation() {
+        let store = MemoryPeers::default();
+        store
+            .put(&PeerRecord::new("peer").granting("acp/1"))
+            .unwrap();
+        with_host(&store, &NoEvents, |mux| {
+            let running = mux.open("acp/1").unwrap();
+            running.send(b"a").unwrap();
+            running.receive(WAIT).unwrap().unwrap();
+            let opening = AtomicBool::new(true);
+            thread::scope(|scope| {
+                scope.spawn(|| {
+                    // Faster than the accept loop's own poll, which is what kept it from ever reaching its check.
+                    while opening.load(Ordering::SeqCst) {
+                        let _ = mux.open(LINK_PROTOCOL);
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                });
+                store.put(&PeerRecord::new("peer")).unwrap();
+                let began = Instant::now();
+                assert_eq!(running.receive(WAIT), Err(Failure::Permission));
+                assert!(
+                    began.elapsed() < Duration::from_secs(2),
+                    "took {:?}",
+                    began.elapsed()
+                );
+                opening.store(false, Ordering::SeqCst);
+            });
+        });
+    }
+
+    #[test]
+    fn a_revocation_is_reported_once() {
+        let store = MemoryPeers::default();
+        store
+            .put(&PeerRecord::new("peer").granting("acp/1"))
+            .unwrap();
+        let events = Recorded::default();
+        with_host(&store, &events, |mux| {
+            let running = mux.open("acp/1").unwrap();
+            running.send(b"a").unwrap();
+            running.receive(WAIT).unwrap().unwrap();
+            store.put(&PeerRecord::new("peer")).unwrap();
+            assert_eq!(running.receive(WAIT), Err(Failure::Permission));
+            thread::sleep(Duration::from_millis(200));
+        });
+        let told = events.0.lock().unwrap();
+        assert_eq!(
+            told.iter()
+                .filter(|event| matches!(event, Event::Revoked { .. }))
+                .count(),
+            1
+        );
     }
 }

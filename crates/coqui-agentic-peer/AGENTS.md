@@ -192,4 +192,6 @@ pub fn listen<C: Channel>(mux: &Mux<'_, C>, listener: &TcpListener, target: &Tar
 pub fn is_loopback(address: IpAddr) -> bool
 ```
 
+A stream ended any way but in order resets the connection, so a cut-short transfer does not read as finished. `Sealed::send` answering `NoProgress` means that message was not taken: send it again.
+
 Gotchas: whoever can connect to a `listen`er gets what this peer was granted, so bind it to loopback. `Limits::max_message` has to allow 16 KiB. A name is resolved by the side connecting, each time, so a grant on a name trusts that name's DNS.

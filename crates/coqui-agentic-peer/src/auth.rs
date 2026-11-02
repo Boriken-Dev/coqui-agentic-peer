@@ -120,6 +120,8 @@ fn drive<H: Handshake, C: Channel>(
         proof.receive(&message).map_err(proof_failed)?;
     }
 }
+/// How often a kept record is tried again while waiting to receive.
+const FLUSH_POLL: Duration = Duration::from_millis(20);
 
 struct SealerState {
     sealer: Sealer,
@@ -178,6 +180,18 @@ impl<'a, C: Channel> Sealed<'a, C> {
         self
     }
 
+    /// Sends a kept record, if there is one. [`Failure::NoProgress`] means it is still kept.
+    fn flush(&self, state: &mut SealerState) -> Result<(), Failure> {
+        let Some(record) = state.waiting.take() else {
+            return Ok(());
+        };
+        let sent = self.channel.send(&record);
+        if sent == Err(Failure::NoProgress) {
+            state.waiting = Some(record);
+        }
+        sent
+    }
+
     fn still_allowed(&self) -> bool {
         let Some(allowed) = &self.allowed else {
             return true;
@@ -192,18 +206,20 @@ impl<'a, C: Channel> Sealed<'a, C> {
 }
 
 impl<C: Channel> Channel for Sealed<'_, C> {
-    /// After [`Failure::NoProgress`], send the same message again: its record is waiting.
+    /// [`Failure::NoProgress`] means this message was not taken, so send it again. A record has to go in the order it was sealed, so
+    /// one the link cannot take yet is kept and goes before anything else: it is already this channel's to deliver, and is never sent
+    /// as if it were another caller's message.
     fn send(&self, message: &[u8]) -> Result<(), Failure> {
         let mut state = self.sealer.lock().unwrap_or_else(PoisonError::into_inner);
-        let record = match state.waiting.take() {
-            Some(record) => record,
-            None => state.sealer.seal(message).map_err(|_| Failure::Protocol)?,
-        };
-        let sent = self.channel.send(&record);
-        if sent == Err(Failure::NoProgress) {
-            state.waiting = Some(record);
+        self.flush(&mut state)?;
+        let record = state.sealer.seal(message).map_err(|_| Failure::Protocol)?;
+        match self.channel.send(&record) {
+            Err(Failure::NoProgress) => {
+                state.waiting = Some(record);
+                Ok(())
+            }
+            other => other,
         }
-        sent
     }
 
     fn receive(&self, timeout: Option<Duration>) -> Result<Option<Vec<u8>>, Failure> {
@@ -212,7 +228,31 @@ impl<C: Channel> Channel for Sealed<'_, C> {
             return Err(Failure::Permission);
         }
         let mut opener = self.opener.lock().unwrap_or_else(PoisonError::into_inner);
-        let Some(record) = self.channel.receive(timeout)? else {
+        let until = timeout.map(|limit| Instant::now() + limit);
+        let incoming = loop {
+            // With nothing more to send, this is what delivers a kept record.
+            let waiting = {
+                let mut state = self.sealer.lock().unwrap_or_else(PoisonError::into_inner);
+                match self.flush(&mut state) {
+                    Ok(()) => false,
+                    Err(Failure::NoProgress) => true,
+                    Err(failure) => return Err(failure),
+                }
+            };
+            if !waiting {
+                break self
+                    .channel
+                    .receive(until.map(|at| at.saturating_duration_since(Instant::now())))?;
+            }
+            let left = until.map_or(FLUSH_POLL, |at| {
+                at.saturating_duration_since(Instant::now())
+            });
+            match self.channel.receive(Some(left.min(FLUSH_POLL))) {
+                Err(Failure::Timeout) if until.is_none_or(|at| Instant::now() < at) => {}
+                other => break other?,
+            }
+        };
+        let Some(record) = incoming else {
             return match opener.verify_end() {
                 Ok(()) => Ok(None),
                 Err(_) => Err(Failure::PathLost),
@@ -230,7 +270,10 @@ impl<C: Channel> Channel for Sealed<'_, C> {
     /// Sends this side's close record, then ends the channel. Safe to call more than once.
     fn close(&self) {
         let mut state = self.sealer.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Ok(record) = state.sealer.close() {
+        // Out of order, the close record would read as tampering, so a link that cannot take what comes before it ends without one.
+        if self.flush(&mut state).is_ok()
+            && let Ok(record) = state.sealer.close()
+        {
             let _ = self.channel.send(&record);
         }
         drop(state);
@@ -240,5 +283,139 @@ impl<C: Channel> Channel for Sealed<'_, C> {
     fn set_max_message(&self, bytes: usize) {
         self.channel
             .set_max_message(bytes.saturating_add(RECORD_OVERHEAD));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc::{Receiver, Sender, channel as queue};
+    use std::thread;
+
+    use coqui_peer_webcrypto::{Trust, WebCrypto};
+
+    use super::*;
+
+    /// A link in memory, for two real handshakes to run over.
+    struct Wire {
+        out: Sender<Vec<u8>>,
+        incoming: Mutex<Receiver<Vec<u8>>>,
+    }
+
+    impl Channel for Wire {
+        fn send(&self, message: &[u8]) -> Result<(), Failure> {
+            self.out
+                .send(message.to_vec())
+                .map_err(|_| Failure::PathLost)
+        }
+
+        fn receive(&self, timeout: Option<Duration>) -> Result<Option<Vec<u8>>, Failure> {
+            let incoming = self.incoming.lock().unwrap();
+            incoming
+                .recv_timeout(timeout.unwrap_or(Duration::from_secs(5)))
+                .map(Some)
+                .map_err(|_| Failure::Timeout)
+        }
+
+        fn close(&self) {}
+    }
+
+    /// A link that can be told it is full, recording what it was given, as a queue that has filled would.
+    #[derive(Default)]
+    struct Fills {
+        full: AtomicBool,
+        taken: Mutex<Vec<Vec<u8>>>,
+    }
+
+    impl Channel for Fills {
+        fn send(&self, message: &[u8]) -> Result<(), Failure> {
+            if self.full.load(Ordering::SeqCst) {
+                return Err(Failure::NoProgress);
+            }
+            self.taken.lock().unwrap().push(message.to_vec());
+            Ok(())
+        }
+
+        fn receive(&self, _timeout: Option<Duration>) -> Result<Option<Vec<u8>>, Failure> {
+            Err(Failure::Timeout)
+        }
+
+        fn close(&self) {}
+    }
+
+    fn sealed_pair() -> (Session, Session) {
+        let dialer = Identity::generate().unwrap();
+        let answerer = Identity::generate().unwrap();
+        let (dialer_id, answerer_id) = (dialer.peer_id(), answerer.peer_id());
+        let dialing = WebCrypto::new(dialer).with_responders(Trust::pinned([answerer_id]));
+        let answering = WebCrypto::new(answerer).with_initiators(Trust::pinned([dialer_id]));
+        let (a_out, b_in) = queue();
+        let (b_out, a_in) = queue();
+        let ours = Wire {
+            out: a_out,
+            incoming: Mutex::new(a_in),
+        };
+        let theirs = Wire {
+            out: b_out,
+            incoming: Mutex::new(b_in),
+        };
+        const LIMIT: Duration = Duration::from_secs(10);
+        thread::scope(|scope| {
+            let answer =
+                scope.spawn(|| prove(&answering, &theirs, LIMIT, 1 << 20).unwrap().session);
+            let dialed = prove_out(&dialing, &ours, LIMIT, 1 << 20).unwrap().session;
+            (dialed, answer.join().unwrap())
+        })
+    }
+
+    fn opened(session: Session, records: &[Vec<u8>]) -> Vec<Vec<u8>> {
+        let (_, mut opener) = session.split();
+        records
+            .iter()
+            .map(|record| opener.open(record).unwrap().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn a_full_link_never_loses_one_callers_message_or_sends_it_twice() {
+        let (ours, theirs) = sealed_pair();
+        let link = Fills::default();
+        let sealed = Sealed::new(&link, ours);
+        sealed.send(b"first").unwrap();
+        link.full.store(true, Ordering::SeqCst);
+        // Taken, and kept: it goes first once the link has room.
+        sealed.send(b"second").unwrap();
+        // Not taken, and it says so, since the one before it is still waiting.
+        assert_eq!(sealed.send(b"third"), Err(Failure::NoProgress));
+        assert_eq!(sealed.send(b"other caller"), Err(Failure::NoProgress));
+        link.full.store(false, Ordering::SeqCst);
+        sealed.send(b"third").unwrap();
+        sealed.send(b"other caller").unwrap();
+        let taken = link.taken.lock().unwrap().clone();
+        assert_eq!(
+            opened(theirs, &taken),
+            [&b"first"[..], b"second", b"third", b"other caller"]
+        );
+    }
+
+    #[test]
+    fn a_kept_record_goes_while_only_receiving() {
+        let (ours, theirs) = sealed_pair();
+        let link = Fills::default();
+        let sealed = Sealed::new(&link, ours);
+        link.full.store(true, Ordering::SeqCst);
+        sealed.send(b"last").unwrap();
+        assert_eq!(
+            sealed.receive(Some(Duration::from_millis(1))),
+            Err(Failure::Timeout)
+        );
+        assert!(link.taken.lock().unwrap().is_empty());
+        link.full.store(false, Ordering::SeqCst);
+        assert_eq!(
+            sealed.receive(Some(Duration::from_millis(1))),
+            Err(Failure::Timeout)
+        );
+        let taken = link.taken.lock().unwrap().clone();
+        assert_eq!(opened(theirs, &taken), [&b"last"[..]]);
     }
 }

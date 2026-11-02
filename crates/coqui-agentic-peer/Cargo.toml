@@ -21,6 +21,8 @@ coqui-web = { git = "https://github.com/Boriken-Dev/coqui-web", rev = "4dc609e5c
 # Pure Rust, with no system mDNS service to depend on.
 mdns-sd = "0.21"
 serde_json = "1"
+# Ending a connection with a reset, which std cannot do.
+socket2 = "0.6"
 url = "2.5"
 
 [dev-dependencies]

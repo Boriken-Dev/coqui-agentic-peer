@@ -76,11 +76,11 @@ A key is one entry in one store, so a new capability is a grant on that entry an
 
 ## Forwarding TCP
 
-`tcp/1` carries one TCP connection per stream. The opener puts the target in the stream's metadata as `HOST:PORT` in UTF-8, with an IPv6 address in brackets. The answering side compares it, spelled one way (a lowercase name, a shortened IPv6 address), against what this peer was granted: it needs `tcp/1` and `tcp/1:HOST:PORT`, nothing else matches, and there are no wildcards. `localhost:80` and `127.0.0.1:80` are different targets, and a name is resolved by the side that connects.
+`tcp/1` carries one TCP connection per stream. The opener puts the target in the stream's metadata as `HOST:PORT` in UTF-8, with an IPv6 address in brackets. The answering side compares it, spelled one way (a lowercase name, a shortened IPv6 address), against what this peer was granted: it needs `tcp/1` and `tcp/1:HOST:PORT`, nothing else matches, and there are no wildcards. `localhost:80` and `127.0.0.1:80` are different targets, and a name is resolved by the side that connects, so a grant on a name trusts that name's DNS. A host that ends in a number has to be a plain dotted quad, since resolvers read `010.0.0.1` and `2130706433` as addresses other than they look, and an unspecified address is refused.
 
 A target is decided before anything connects, so a refusal says nothing about what is there. It is decided again while the stream runs, so removing either grant closes the stream with reason `revoked`. A granted target that cannot be reached closes it with reason `refused`.
 
-A stream's data frames are the connection's bytes in order, with no framing of their own. `finish` is a FIN: each direction ends by itself, and a client that stops sending still gets its answer. Closing a stream for any other reason drops the connection. Either side may open, so a forward runs in either direction, and each side decides from its own grants.
+A stream's data frames are the connection's bytes in order, with no framing of their own. `finish` is a FIN: each direction ends by itself, and a client that stops sending still gets its answer. A stream closed in order ends the connection once what it sent has been written. Ended any other way, or when its link goes, it resets the connection, so what was cut short does not read as finished, and a side whose connection fails closes the stream with reason `refused`. Either side may open, so a forward runs in either direction, and each side decides from its own grants.
 
 ## Flow control
 

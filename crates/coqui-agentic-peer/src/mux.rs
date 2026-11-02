@@ -332,6 +332,8 @@ impl StreamEnd {
             Self::PeerClosed => None,
             Self::Refused(_) | Self::Superseded(_) | Self::Revoked(_) => Some(Failure::Permission),
             Self::Broken => Some(Failure::Protocol),
+            // `NoProgress` from a stream means full, try again, and that will never again be true. `end` has the cause.
+            Self::LinkLost(Failure::NoProgress) => Some(Failure::PathLost),
             Self::LinkLost(failure) => Some(*failure),
         }
     }
@@ -900,8 +902,21 @@ impl<C: Channel> core::fmt::Debug for Stream<'_, C> {
     }
 }
 
+/// How much of a stream is left, for a service that has to notice while it waits on something else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamLife {
+    /// Running.
+    Open,
+    /// The other side closed it in order. What it sent can still be read.
+    Draining,
+    /// Ended any other way, here or there, or its link went. Stop at once.
+    Gone,
+}
+
 /// A stream as a service sees it, whatever carries the link: it can stop sending and go on reading, and say why it ended.
 pub trait LinkStream: Channel {
+    /// How much of it is left.
+    fn life(&self) -> StreamLife;
     /// See [`Stream::finish`].
     ///
     /// # Errors
@@ -914,6 +929,21 @@ pub trait LinkStream: Channel {
 }
 
 impl<C: Channel> LinkStream for Stream<'_, C> {
+    fn life(&self) -> StreamLife {
+        let state = self.shared.lock();
+        if state.link.is_some() {
+            return StreamLife::Gone;
+        }
+        match state
+            .streams
+            .get(&self.id)
+            .map(|entry| entry.ended.as_ref())
+        {
+            Some(None) => StreamLife::Open,
+            Some(Some(StreamEnd::PeerClosed)) => StreamLife::Draining,
+            _ => StreamLife::Gone,
+        }
+    }
     fn finish(&self) -> Result<(), Failure> {
         Stream::finish(self)
     }
@@ -980,6 +1010,8 @@ impl<C: Channel> Stream<'_, C> {
             state.streams.remove(&self.id);
             told
         };
+        // Before telling the other side, which on a full link can take as long as the link allows.
+        self.shared.changed.notify_all();
         if tell_peer {
             let _ = control(
                 self.channel,
@@ -990,7 +1022,6 @@ impl<C: Channel> Stream<'_, C> {
                 },
             );
         }
-        self.shared.changed.notify_all();
     }
 
     fn send_by(&self, message: &[u8], until: Option<Instant>) -> Result<(), Failure> {

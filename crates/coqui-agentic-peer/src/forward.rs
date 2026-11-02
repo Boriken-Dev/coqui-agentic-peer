@@ -6,16 +6,18 @@
 
 use std::io::{self, Read as _, Write as _};
 use std::net::{
-    IpAddr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs as _,
+    IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs as _,
 };
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use coqui_web::{Channel, Failure};
+use socket2::SockRef;
 
 use crate::link::{Accepted, Services};
-use crate::mux::{CloseReason, LinkState, LinkStream, Mux, Stream};
+use crate::mux::{CloseReason, LinkState, LinkStream, Mux, Stream, StreamLife};
 use crate::peers::PeerRecord;
 
 /// The protocol token.
@@ -26,6 +28,13 @@ const MAX_HOST: usize = 253;
 const CHUNK: usize = 16 * 1024;
 const CONNECT: Duration = Duration::from_secs(10);
 const LISTEN_POLL: Duration = Duration::from_millis(50);
+/// How often each direction looks at the stream, while its connection has nothing for it.
+const IDLE_MIN: Duration = Duration::from_millis(1);
+const IDLE_MAX: Duration = Duration::from_millis(10);
+const WATCH: Duration = Duration::from_millis(50);
+/// How long a connection that has stopped reading may hold what a stream that has ended in order sent.
+const STALLED: Duration = Duration::from_secs(30);
+const FAILED: &str = "the connection to the target failed";
 
 /// Where a stream goes: a host and a port, in one spelling, since a grant compares exactly. `localhost:80` and `127.0.0.1:80` are
 /// different targets, and a name is resolved by the side that connects, whenever it connects.
@@ -52,6 +61,9 @@ impl FromStr for Target {
 
     fn from_str(text: &str) -> Result<Self, BadTarget> {
         let (host, port) = text.rsplit_once(':').ok_or(BadTarget)?;
+        if !host.is_ascii() {
+            return Err(BadTarget);
+        }
         if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) {
             return Err(BadTarget);
         }
@@ -61,15 +73,27 @@ impl FromStr for Target {
         }
         let host = if let Some(inner) = host.strip_prefix('[') {
             let inner = inner.strip_suffix(']').ok_or(BadTarget)?;
-            inner
-                .parse::<Ipv6Addr>()
-                .map_err(|_| BadTarget)?
-                .to_string()
+            let address = inner.parse::<Ipv6Addr>().map_err(|_| BadTarget)?;
+            if address.is_unspecified() {
+                return Err(BadTarget);
+            }
+            address.to_string()
         } else {
             let allowed =
                 |byte: u8| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_');
             if host.is_empty() || host.len() > MAX_HOST || !host.bytes().all(allowed) {
                 return Err(BadTarget);
+            }
+            // A resolver reads `010.0.0.1`, `2130706433` and `0x7f.1` as addresses other than they look, so a grant on one could
+            // reach something the person did not mean. A name is not numeric at its end, and an address is a plain dotted quad.
+            let last = host.rsplit('.').next().unwrap_or(host);
+            let numeric = last.bytes().all(|byte| byte.is_ascii_digit())
+                || last.to_ascii_lowercase().starts_with("0x");
+            if numeric {
+                let address = host.parse::<Ipv4Addr>().map_err(|_| BadTarget)?;
+                if address.is_unspecified() {
+                    return Err(BadTarget);
+                }
             }
             host.to_ascii_lowercase()
         };
@@ -151,61 +175,166 @@ pub fn serving(services: Services) -> Services {
     services.with_admission(TCP_PROTOCOL, Box::new(handle), Box::new(admit))
 }
 
-/// Moves bytes both ways until both have ended. Each direction ends by itself, so a client that stops sending still gets its
-/// answer, and a stream ended by the other side, for whatever reason, drops the connection.
+/// Moves bytes both ways until both have ended, then ends the connection. Each direction ends by itself, so a client that stops
+/// sending still gets its answer. A stream that ends any way but in order ends the connection at once, even if the far end of the
+/// connection never reads or never closes, and ends it with a reset, so what was cut short does not read as finished.
+///
+/// The socket is non-blocking so each direction can always notice the stream's end: Windows does not wake a blocked receive when the
+/// socket is shut down, and warns that a send timeout leaves a socket in an undefined state.
 pub fn pump<S: LinkStream + ?Sized>(stream: &S, connection: &TcpStream) {
+    if connection.set_nonblocking(true).is_err() {
+        stream.close_with(CloseReason::Refused, FAILED);
+        return;
+    }
+    let stop = AtomicBool::new(false);
+    let cut_short = AtomicBool::new(false);
     thread::scope(|scope| {
-        scope.spawn(|| {
-            let mut reader = connection;
-            let mut buffer = vec![0_u8; CHUNK];
-            loop {
-                match reader.read(&mut buffer) {
-                    Ok(0) => {
-                        let _ = stream.finish();
-                        return;
-                    }
-                    Ok(read) => {
-                        let sent = loop {
-                            match stream.send(&buffer[..read]) {
-                                // The other side has not read yet, which is what a window is for.
-                                Err(Failure::NoProgress) => {}
-                                other => break other,
-                            }
-                        };
-                        if sent.is_err() {
-                            let _ = connection.shutdown(Shutdown::Both);
-                            return;
-                        }
-                    }
-                    Err(_) => {
-                        let _ = connection.shutdown(Shutdown::Both);
-                        Channel::close(stream);
-                        return;
-                    }
-                }
-            }
-        });
-        let mut writer = connection;
-        loop {
-            match stream.receive(None) {
-                Ok(Some(message)) => {
-                    if writer.write_all(&message).is_err() {
-                        let _ = connection.shutdown(Shutdown::Both);
-                        Channel::close(stream);
-                        return;
-                    }
-                }
-                Ok(None) => {
-                    let _ = connection.shutdown(Shutdown::Write);
-                    return;
-                }
-                Err(_) => {
-                    let _ = connection.shutdown(Shutdown::Both);
-                    return;
-                }
+        scope.spawn(|| connection_to_stream(stream, connection, &stop, &cut_short));
+        stream_to_connection(stream, connection, &stop, &cut_short);
+    });
+    if cut_short.load(Ordering::SeqCst) {
+        // What follows when this is dropped is a reset rather than a close. Without the option the worst is a clean end.
+        let _ = SockRef::from(connection).set_linger(Some(Duration::ZERO));
+    } else {
+        let _ = connection.shutdown(Shutdown::Both);
+    }
+}
+
+fn connection_to_stream<S: LinkStream + ?Sized>(
+    stream: &S,
+    connection: &TcpStream,
+    stop: &AtomicBool,
+    cut_short: &AtomicBool,
+) {
+    let mut reader = connection;
+    let mut buffer = vec![0_u8; CHUNK];
+    let mut idle = IDLE_MIN;
+    loop {
+        if stop.load(Ordering::SeqCst) {
+            return;
+        }
+        match stream.life() {
+            StreamLife::Open => {}
+            // Nothing more can be sent. The other direction is what is left.
+            StreamLife::Draining => return,
+            StreamLife::Gone => {
+                cut_short.store(true, Ordering::SeqCst);
+                stop.store(true, Ordering::SeqCst);
+                return;
             }
         }
-    });
+        match reader.read(&mut buffer) {
+            Ok(0) => {
+                let _ = stream.finish();
+                return;
+            }
+            Ok(read) => {
+                idle = IDLE_MIN;
+                if !send_all(stream, &buffer[..read], stop) {
+                    cut_short.store(true, Ordering::SeqCst);
+                    stop.store(true, Ordering::SeqCst);
+                    return;
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(idle);
+                idle = (idle * 2).min(IDLE_MAX);
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => {
+                stream.close_with(CloseReason::Refused, FAILED);
+                cut_short.store(true, Ordering::SeqCst);
+                stop.store(true, Ordering::SeqCst);
+                return;
+            }
+        }
+    }
+}
+
+/// `false` when it could not all go. A full window is only a wait, for as long as the stream is alive.
+fn send_all<S: LinkStream + ?Sized>(stream: &S, bytes: &[u8], stop: &AtomicBool) -> bool {
+    loop {
+        match stream.send(bytes) {
+            Ok(()) => return true,
+            Err(Failure::NoProgress)
+                if !stop.load(Ordering::SeqCst) && stream.life() == StreamLife::Open =>
+            {
+                thread::sleep(IDLE_MIN);
+            }
+            Err(_) => return false,
+        }
+    }
+}
+
+fn stream_to_connection<S: LinkStream + ?Sized>(
+    stream: &S,
+    connection: &TcpStream,
+    stop: &AtomicBool,
+    cut_short: &AtomicBool,
+) {
+    let mut writer = connection;
+    loop {
+        if stop.load(Ordering::SeqCst) {
+            return;
+        }
+        match stream.receive(Some(WATCH)) {
+            Ok(Some(message)) => {
+                if !write_all(stream, &mut writer, &message, stop) {
+                    Channel::close(stream);
+                    cut_short.store(true, Ordering::SeqCst);
+                    stop.store(true, Ordering::SeqCst);
+                    return;
+                }
+            }
+            Ok(None) => {
+                let _ = connection.shutdown(Shutdown::Write);
+                return;
+            }
+            Err(Failure::Timeout) => {}
+            Err(_) => {
+                cut_short.store(true, Ordering::SeqCst);
+                stop.store(true, Ordering::SeqCst);
+                return;
+            }
+        }
+    }
+}
+
+/// `false` when it could not all go. A connection that stops reading holds this only for as long as the stream is alive, and for
+/// [`STALLED`] once the other side has closed in order and nothing more is coming.
+fn write_all<S: LinkStream + ?Sized>(
+    stream: &S,
+    writer: &mut &TcpStream,
+    mut bytes: &[u8],
+    stop: &AtomicBool,
+) -> bool {
+    let mut idle = IDLE_MIN;
+    let mut moved = Instant::now();
+    while !bytes.is_empty() {
+        match writer.write(bytes) {
+            Ok(0) => return false,
+            Ok(written) => {
+                bytes = &bytes[written..];
+                idle = IDLE_MIN;
+                moved = Instant::now();
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                if stop.load(Ordering::SeqCst) {
+                    return false;
+                }
+                match stream.life() {
+                    StreamLife::Open => {}
+                    StreamLife::Draining if moved.elapsed() < STALLED => {}
+                    _ => return false,
+                }
+                thread::sleep(idle);
+                idle = (idle * 2).min(IDLE_MAX);
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => return false,
+        }
+    }
+    true
 }
 
 /// Opens a stream to `target`.
@@ -418,6 +547,14 @@ mod tests {
             "[::1]",
             "[::1:80",
             "[nope]:80",
+            "0.0.0.0:80",
+            "[::]:80",
+            "010.0.0.1:80",
+            "0177.0.0.1:80",
+            "2130706433:80",
+            "0x7f.1:80",
+            "127.1:80",
+            "1.2.3:80",
             "a b:80",
             "a/b:80",
             "a@b:80",
@@ -529,9 +666,11 @@ mod tests {
             connection
                 .set_read_timeout(Some(Duration::from_secs(20)))
                 .unwrap();
-            // Only the connection ending lets this finish without an error.
+            // It ends with a reset now, which is what a cut-short connection is, and well before this read's own limit.
             let mut asked = Vec::new();
-            let _ = seen.send(connection.read_to_end(&mut asked).is_ok());
+            let began = Instant::now();
+            let _ = connection.read_to_end(&mut asked);
+            let _ = seen.send(began.elapsed() < Duration::from_secs(15));
         });
         with_link(&store, |mux| {
             let stream = connect(mux, &held).unwrap();
@@ -670,6 +809,219 @@ mod tests {
             ours.cut();
             theirs.cut();
             serving.join().unwrap();
+        });
+    }
+
+    /// A target that accepts, then neither reads nor closes, as a machine gone quiet would.
+    fn quiet_target() -> (Target, mpsc::Receiver<TcpStream>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let target: Target = listener.local_addr().unwrap().to_string().parse().unwrap();
+        let (holding, held) = mpsc::channel();
+        thread::spawn(move || {
+            if let Ok((connection, _)) = listener.accept() {
+                let _ = holding.send(connection);
+            }
+        });
+        (target, held)
+    }
+
+    /// `body` on a link it can end at will, returning how long the serving side took to come back after that.
+    fn with_serving(store: &MemoryPeers, body: impl FnOnce(&Mux<'_, Wire>) + Send) -> Duration {
+        let (ours, theirs) = wires();
+        let services = serving(Services::default());
+        let options = Options {
+            recheck: Duration::from_millis(20),
+            ..Options::default()
+        };
+        thread::scope(|scope| {
+            let host = Host {
+                store,
+                services: &services,
+                events: &NoEvents,
+            };
+            let answered = &theirs;
+            let cut = CutOnDrop(&ours, &theirs);
+            let serving =
+                scope.spawn(move || serve(answered, Side::Answered, options, None, "peer", &host));
+            Mux::run(&ours, Side::Dialed, Limits::default(), None, body);
+            drop(cut);
+            let began = Instant::now();
+            serving.join().unwrap();
+            began.elapsed()
+        })
+    }
+
+    const PROMPTLY: Duration = Duration::from_secs(5);
+
+    #[test]
+    fn revoking_ends_a_connection_whose_target_never_closes() {
+        let (target, held) = quiet_target();
+        let held = Mutex::new(held);
+        let store = MemoryPeers::default();
+        store.put(&grant(PeerRecord::new("peer"), &target)).unwrap();
+        let took = with_serving(&store, |mux| {
+            let stream = connect(mux, &target).unwrap();
+            let mut connection = held.lock().unwrap().recv_timeout(WAIT).unwrap();
+            store
+                .put(&PeerRecord::new("peer").granting(TCP_PROTOCOL))
+                .unwrap();
+            assert_eq!(stream.receive(Some(WAIT)), Err(Failure::Permission));
+            connection.set_read_timeout(Some(WAIT)).unwrap();
+            let mut rest = Vec::new();
+            // Reset or closed: either way it ends, and well before the target gives up.
+            let began = Instant::now();
+            let _ = connection.read_to_end(&mut rest);
+            assert!(began.elapsed() < PROMPTLY, "the connection stayed open");
+        });
+        assert!(took < PROMPTLY, "serve did not come back: {took:?}");
+    }
+
+    #[test]
+    fn revoking_ends_a_connection_whose_target_has_stopped_reading() {
+        let (target, held) = quiet_target();
+        let held = Mutex::new(held);
+        let store = MemoryPeers::default();
+        store.put(&grant(PeerRecord::new("peer"), &target)).unwrap();
+        let took = with_serving(&store, |mux| {
+            let stream = connect(mux, &target).unwrap();
+            let _connection = held.lock().unwrap().recv_timeout(WAIT).unwrap();
+            // Far more than the socket buffers hold, so the writing side is stuck when the grant goes.
+            let chunk = vec![1_u8; 512 * 1024];
+            for _ in 0..64 {
+                match stream.try_send(&chunk) {
+                    Ok(()) => {}
+                    Err(_) => break,
+                }
+                thread::sleep(Duration::from_millis(2));
+            }
+            store
+                .put(&PeerRecord::new("peer").granting(TCP_PROTOCOL))
+                .unwrap();
+            let began = Instant::now();
+            while stream.life() != StreamLife::Gone {
+                assert!(began.elapsed() < PROMPTLY, "the revocation did not arrive");
+                thread::sleep(Duration::from_millis(10));
+            }
+        });
+        assert!(took < PROMPTLY, "serve did not come back: {took:?}");
+    }
+
+    #[test]
+    fn a_link_ending_ends_a_connection_whose_target_stays_quiet() {
+        let (target, held) = quiet_target();
+        let held = Mutex::new(held);
+        let store = MemoryPeers::default();
+        store.put(&grant(PeerRecord::new("peer"), &target)).unwrap();
+        let took = with_serving(&store, |mux| {
+            let _stream = connect(mux, &target).unwrap();
+            let _connection = held.lock().unwrap().recv_timeout(WAIT).unwrap();
+        });
+        assert!(took < PROMPTLY, "serve did not come back: {took:?}");
+    }
+
+    #[test]
+    fn a_peer_closing_in_order_ends_a_connection_whose_target_stays_quiet() {
+        let (target, held) = quiet_target();
+        let held = Mutex::new(held);
+        let store = MemoryPeers::default();
+        store.put(&grant(PeerRecord::new("peer"), &target)).unwrap();
+        with_serving(&store, |mux| {
+            let stream = connect(mux, &target).unwrap();
+            let mut connection = held.lock().unwrap().recv_timeout(WAIT).unwrap();
+            stream.send(b"last words").unwrap();
+            Channel::close(&stream);
+            connection.set_read_timeout(Some(WAIT)).unwrap();
+            let mut heard = Vec::new();
+            let began = Instant::now();
+            connection.read_to_end(&mut heard).unwrap();
+            assert_eq!(heard, b"last words", "what it sent still arrives");
+            assert!(began.elapsed() < PROMPTLY);
+        });
+    }
+
+    #[test]
+    fn a_silent_link_does_not_leave_a_connection_spinning() {
+        let (target, held) = quiet_target();
+        let held = Mutex::new(held);
+        let store = MemoryPeers::default();
+        store.put(&grant(PeerRecord::new("peer"), &target)).unwrap();
+        let (ours, theirs) = wires();
+        let services = serving(Services::default());
+        let options = Options {
+            limits: Limits {
+                heartbeat: Some(crate::mux::Heartbeat::new(Duration::from_millis(20), 5)),
+                ..Limits::default()
+            },
+            ..Options::default()
+        };
+        thread::scope(|scope| {
+            let host = Host {
+                store: &store,
+                services: &services,
+                events: &NoEvents,
+            };
+            let answered = &theirs;
+            let cut = CutOnDrop(&ours, &theirs);
+            let serving =
+                scope.spawn(move || serve(answered, Side::Answered, options, None, "peer", &host));
+            // Opens one stream and goes silent, with its side of the wire still connected: no pongs, nothing read.
+            ours.send(
+                &crate::mux::Frame::Open {
+                    stream: 1,
+                    protocol: TCP_PROTOCOL.to_owned(),
+                    metadata: target.to_string().into_bytes(),
+                }
+                .encode(),
+            )
+            .unwrap();
+            let connection = held.lock().unwrap().recv_timeout(WAIT).unwrap();
+            let began = Instant::now();
+            while !serving.is_finished() {
+                assert!(
+                    began.elapsed() < Duration::from_secs(20),
+                    "serve did not come back after the link went silent"
+                );
+                thread::sleep(Duration::from_millis(20));
+            }
+            drop(connection);
+            drop(cut);
+        });
+    }
+
+    #[test]
+    fn a_target_that_fails_midway_does_not_read_as_finished() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let target: Target = listener.local_addr().unwrap().to_string().parse().unwrap();
+        thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            connection.write_all(b"partial").unwrap();
+            thread::sleep(Duration::from_millis(100));
+            // A reset, as a crash or a dropped route looks.
+            SockRef::from(&connection)
+                .set_linger(Some(Duration::ZERO))
+                .unwrap();
+        });
+        let store = MemoryPeers::default();
+        store.put(&grant(PeerRecord::new("peer"), &target)).unwrap();
+        with_link(&store, |mux| {
+            let local = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = local.local_addr().unwrap();
+            thread::scope(|scope| {
+                scope.spawn(|| {
+                    let (connection, _) = local.accept().unwrap();
+                    let stream = connect(mux, &target).unwrap();
+                    pump(&stream, &connection);
+                });
+                let mut client = TcpStream::connect(address).unwrap();
+                client.set_read_timeout(Some(WAIT)).unwrap();
+                let mut answer = Vec::new();
+                let read = client.read_to_end(&mut answer);
+                assert!(
+                    read.is_err(),
+                    "ended as if finished, after {:?}",
+                    String::from_utf8_lossy(&answer)
+                );
+            });
         });
     }
 }
