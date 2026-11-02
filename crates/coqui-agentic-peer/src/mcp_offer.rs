@@ -161,9 +161,11 @@ fn offer(
     }
     let mut knocking: Vec<Knock> = Vec::new();
     while stream.life() == StreamLife::Open {
-        if let Ok((connection, _)) = listener.accept()
-            && connection.set_nonblocking(true).is_ok()
-        {
+        // All that are waiting, so however many connected first cannot put off the real one by a turn each.
+        while let Ok((connection, _)) = listener.accept() {
+            if connection.set_nonblocking(true).is_err() {
+                continue;
+            }
             if knocking.len() >= MAX_KNOCKING {
                 knocking.remove(0);
             }
