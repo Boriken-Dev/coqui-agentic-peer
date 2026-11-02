@@ -82,6 +82,21 @@ A target is decided before anything connects, so a refusal says nothing about wh
 
 A stream's data frames are the connection's bytes in order, with no framing of their own. `finish` is a FIN: each direction ends by itself, and a client that stops sending still gets its answer. A stream closed in order ends the connection once what it sent has been written. Ended any other way, or when its link goes, it resets the connection, so what was cut short does not read as finished, and a side whose connection fails closes the stream with reason `refused`. Either side may open, so a forward runs in either direction, and each side decides from its own grants.
 
+## Offering MCP to a program here
+
+`mcp-offer/1` lets a peer serve its own MCP tools to a program on the side it opened the stream to, typically an agent that side started. ACP requires every agent to take a stdio MCP server, so that is what the peer is given: the opener may put a server name in the metadata (ASCII letters, digits, `-` and `_`, up to 64 bytes), and the first message on the stream is one entry for `mcpServers`:
+
+```json
+{ "name": "canoa-browser", "command": "/abs/path/coqui-acp-bridge", "args": ["mcp-shim"],
+  "env": [{ "name": "COQUI_MCP_OFFER_ADDRESS", "value": "127.0.0.1:50123" }, { "name": "COQUI_MCP_OFFER_TOKEN", "value": "…" }] }
+```
+
+The peer declares that entry to its agent. The program it names connects to the address, which is a loopback port made for this stream, and sends the token and a line feed. From then on each line it carries is one message on the stream, both ways: MCP's own stdio messages, unchanged. A stream message holding a line break ends that connection, since it would forge a second line. Something without the token gets nothing, and a program that ends its server may connect again.
+
+The token is 256 random bits and travels in the environment, not in arguments, since another user can read a process's arguments. The port and token last as long as the stream, so revoking the grant or losing the link ends them, and the program's connection with them. This is not HTTP, so a web page that fires a request at the port can neither pass the first line nor read an answer.
+
+A grant on `acp/1` already lets a peer declare any stdio command to its agent. `mcp-offer/1` adds a way to reach the peer's tools from that command, and nothing else.
+
 ## Flow control
 
 Each direction of each stream starts with a window of credit, 1 MiB by default. Sending a message costs its size in credit. A sender MAY start a message only while its credit is above zero, so a message larger than the window still passes, one at a time. A receiver returns credit as the application reads, not as the link delivers.

@@ -12,6 +12,7 @@ pub mod discovery;
 pub mod forward;
 pub mod home;
 pub mod link;
+pub mod mcp_offer;
 pub mod mux;
 pub mod pairing;
 pub mod peers;

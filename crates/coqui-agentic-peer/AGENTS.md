@@ -2,7 +2,7 @@
 
 Header-file-style reference for the `coqui-agentic-peer` crate, so it can be used without reading the source. It ships inside the package and is self-contained.
 
-No Cargo features. MSRV Rust 1.89. Version `0.0.0-alpha.0`, not published. It depends on `coqui-web`, `coqui-peer`, `coqui-peer-webcrypto`, `mdns-sd`, `serde_json` and `url`. No `unsafe` code. Public modules: `auth`, `companion`, `discovery`, `home`, `link`, `mux`, `pairing`, `peers`.
+No Cargo features. MSRV Rust 1.89. Version `0.0.0-alpha.0`, not published. It depends on `coqui-web`, `coqui-peer`, `coqui-peer-webcrypto`, `mdns-sd`, `serde_json` and `url`. No `unsafe` code. Public modules: `auth`, `companion`, `discovery`, `forward`, `home`, `link`, `mcp_offer`, `mux`, `pairing`, `peers`.
 
 ## `coqui_agentic_peer::mux`
 
@@ -41,6 +41,21 @@ pub fn Stream::end(&self) -> Option<StreamEnd>
 - `Limits::heartbeat` is off by default, and a zero interval or zero misses turns it off too. It loses a link only when nothing at all is heard, so a stream silent for hours is fine. `link_state` says when a link went; what that means is the host's to decide.
 - What one stream does wrong ends that stream. What no peer may send ends the link.
 - A proof admits a peer to the link and grants no protocol. Deciding who may open what is the caller's: `accept`, then serve, or `close_with(CloseReason::Refused, why)`. `metadata` is kept nowhere, and is not a credential of the link's.
+
+## `coqui_agentic_peer::mcp_offer`
+
+```rust
+pub const OFFER_PROTOCOL: &str = "mcp-offer/1";
+pub const ADDRESS_VARIABLE: &str = "COQUI_MCP_OFFER_ADDRESS";
+pub const TOKEN_VARIABLE: &str = "COQUI_MCP_OFFER_TOKEN";
+pub fn handler(command: PathBuf, args: Vec<String>) -> link::Handler      // what Services::with takes; command is absolute and starts shim
+pub fn shim(input: impl Read + Send + 'static, output: impl Write) -> Result<(), ShimError>   // the stdio server, from its environment
+pub enum ShimError { Setting(&'static str), Io(io::Error) }  // non_exhaustive
+```
+
+- A peer opens the stream, with a server name in `metadata` or none, and its first message is a stdio `mcpServers` entry to declare to its agent. Lines the shim carries are then that stream's messages, both ways. The wire is in `docs/link.md`.
+- The shim refuses an address off this machine, so the token goes nowhere else. It returns when either end stops; call it with standard input and output, and exit.
+- The port and token last as long as the stream.
 
 ## `coqui_agentic_peer::link`
 
