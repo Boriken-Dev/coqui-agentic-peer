@@ -121,7 +121,7 @@ One identity per method and one trust store per user is what makes one pairing s
 ```rust
 pub const MAX_PROOF_MESSAGE: usize = 3072;
 pub enum Method { WebCrypto, Noise }   // Copy, Eq, Hash, Display, FromStr ("webcrypto" | "noise", exactly); non_exhaustive
-pub const Method::DEFAULT: Method;     // what a new identity gets when nothing names a method
+pub const Method::DEFAULT: Method;     // Noise: what a new identity gets when nothing names a method
 pub const Method::ALL: [Method; 2];
 pub const fn Method::name(self) -> &'static str
 pub const fn Method::record_length(self, message: usize) -> usize   // the longest record: WebCrypto message + 17; Noise message + 38 per 65,518 bytes or part

@@ -45,7 +45,7 @@ pub enum Method {
 
 impl Method {
     /// The method a new identity gets when nothing names one. An existing identity keeps its own.
-    pub const DEFAULT: Self = Self::WebCrypto;
+    pub const DEFAULT: Self = Self::Noise;
 
     /// Every method, in no order of preference.
     pub const ALL: [Self; 2] = [Self::WebCrypto, Self::Noise];
