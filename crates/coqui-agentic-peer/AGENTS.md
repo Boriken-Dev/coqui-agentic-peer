@@ -104,6 +104,8 @@ A host keeps peers in its own registry by implementing `PeerStore`, with no file
 pub const HOME_ENV: &str = "COQUI_AGENTIC_PEER_HOME";
 pub fn dir() -> Option<PathBuf>                        // $COQUI_AGENTIC_PEER_HOME, or coqui-agentic-peer under %LOCALAPPDATA%, $XDG_CONFIG_HOME or ~/.config
 pub const fn identity_file(method: Method) -> &'static str          // "identity" (WebCrypto), "identity-noise" (Noise)
+pub const METHOD_FILE: &str = "method";                             // the home's chosen method, one line: noise or webcrypto
+pub fn chosen_method() -> Result<Option<Method>, Error>
 pub fn identity_path(method: Method) -> Result<PathBuf, Error>
 pub fn methods() -> Result<Vec<Method>, Error>                      // the methods this user has an identity of
 pub fn store_path() -> Result<PathBuf, Error>
@@ -112,7 +114,7 @@ pub fn identity(path: Option<&Path>, method: Option<Method>) -> Result<Identity,
 pub fn store(path: Option<&Path>) -> Result<TrustStore, Error>     // this user's, or at path; keys of both methods
 ```
 
-One identity per method and one trust store per user is what makes one pairing serve every program and capability. `identity`: with `path`, the key there, whose type is its method, or a new one of `method` (else `Method::DEFAULT`); without, this user's identity of `method`, or with no method the one this user has, a new `Method::DEFAULT` one when they have none, and `Error::Identity` when they have one of each. A key of another method than the one named is refused, never replaced.
+One identity per method and one trust store per user is what makes one pairing serve every program and capability. `identity`: with `path`, the key there, whose type is its method, or a new one of `method` (else `Method::DEFAULT`); without, this user's identity of `method`, which the home then records in `METHOD_FILE`; with no method, the one `METHOD_FILE` records, else the one identity this user has (then recorded), else a new `Method::DEFAULT` one (then recorded), and `Error::Identity` only for a home from before the record that holds both. So the method named last is the one every later program naming none uses. A key of another method than the one named is refused, never replaced. A file that cannot be written says why: the error carries the system's own.
 
 ## `coqui_agentic_peer::auth`
 
@@ -122,7 +124,7 @@ pub enum Method { WebCrypto, Noise }   // Copy, Eq, Hash, Display, FromStr ("web
 pub const Method::DEFAULT: Method;     // what a new identity gets when nothing names a method
 pub const Method::ALL: [Method; 2];
 pub const fn Method::name(self) -> &'static str
-pub const fn Method::record_length(self, message: usize) -> usize   // WebCrypto: message + 17; Noise: message + 19 per 65,518 bytes or part
+pub const fn Method::record_length(self, message: usize) -> usize   // the longest record: WebCrypto message + 17; Noise message + 38 per 65,518 bytes or part
 pub fn Method::of_key(material: &KeyMaterial) -> Option<Method>
 
 pub enum Identity { WebCrypto(coqui_peer_webcrypto::Identity), Noise(coqui_peer_noise::Identity) }   // Clone, From both; Debug shows method and id; non_exhaustive
@@ -144,7 +146,7 @@ pub fn Proof::with_responders(self, trust: Trust) -> Proof       // whom prove_o
 pub fn Proof::with_initiators(self, trust: Trust) -> Proof       // whom prove admits
 pub fn Proof::with_key_limit(self, bytes: u64) -> Proof          // WebCrypto's session limit, Noise's key limit; 2^38 by default, no floor
 pub fn Proof::with_rekey(self, rekey: bool) -> Result<Proof, Error>   // Noise: on by default; WebCrypto refuses true, having no key change
-pub fn Proof::with_max_message(self, bytes: usize) -> Proof      // WebCrypto's handshake message limit; Noise's messages have fixed lengths
+pub fn Proof::with_max_message(self, bytes: usize) -> Result<Proof, Error>   // WebCrypto's handshake message limit; Error::Proof under Noise, whose messages have fixed lengths
 pub const fn Proof::method(&self) -> Method
 pub fn Proof::peer_id(&self) -> PeerId
 pub fn Proof::weakened(&self) -> Vec<Weakening>
@@ -160,9 +162,9 @@ pub fn Sealed::with_check(self, allowed: impl Fn() -> bool + Send + Sync + 'a) -
 pub const fn Sealed::with_check_every(self, recheck: Duration) -> Sealed<'a, C>                    // a second unless set
 ```
 
-An endpoint proves by one method, chosen when it is built: nothing on the wire names it and nothing negotiates it. A peer of the other method fails the handshake; the responder's `Error::Proof` names both methods, from the shape of the first message (WebCrypto's is JSON, Noise's 32 bytes), and the side that connected sees only the connection end, as `Error::Channel`. A peer id is the hash of a key of one type, so only its own method proves it: store the method with the id, and never fall back on a failure.
+An endpoint proves by one method, chosen when it is built: nothing on the wire names it and nothing negotiates it. A peer of the other method fails the handshake; the responder's `Error::OtherMethod` names both methods, from the shape of the first message (WebCrypto's is JSON, Noise's 32 bytes), and the side that connected sees only the connection end, as `Error::Channel`. A peer id is the hash of a key of one type, so only its own method proves it: store the method with the id, and never fall back on a failure.
 
-`create_identity` never replaces a file. `prove` answers and `prove_out` connects, within `limit`, refusing a message over 3072 bytes, and set the channel's limit to `max_message` before the proof's last message goes out: size it with `Method::record_length`. `Sealed::set_max_message(n)` sets the channel's to its method's `record_length(n)`.
+`create_identity` never replaces a file. `prove` answers and `prove_out` connects, within `limit`, refusing a message over 3072 bytes, and set the channel's limit to `max_message` before the proof's last message goes out: size it with `Method::record_length`. `Sealed::set_max_message(n)` sets the channel's to its method's `record_length(n)`. Under Noise that is the worst case at any key limit the sender runs: 19 bytes per part of 65,518 bytes, and 19 more per part for a change of key in front of it (9,766 at 16 MiB), since a receiver cannot know the sender's limit.
 
 ## `coqui_agentic_peer::pairing`
 
@@ -186,7 +188,7 @@ pub enum Source { Network, ThisMachine }  // non_exhaustive
 pub fn Candidate::to_json(&self) -> Value
 pub fn Advertisement::new(label: &str, tls: bool) -> Result<Advertisement, Error>
 pub fn Advertisement::with_peer(self, peer: Option<String>) -> Advertisement
-pub const fn Advertisement::with_method(self, method: Method) -> Advertisement   // WebCrypto unless set
+pub const fn Advertisement::with_method(self, method: Method) -> Advertisement   // Method::DEFAULT unless set
 pub const fn Advertisement::with_webtransport(self, port: Option<u16>) -> Advertisement
 pub fn Advertisement::with_webtransport_hash(self, hash: Option<String>) -> Advertisement
 pub fn Advertisement::with_host(self, host: Option<String>) -> Result<Advertisement, Error>
@@ -219,7 +221,7 @@ It answers `{ "op": "discover", "seconds": N }`, at most 10 seconds, and nothing
 
 ## Errors
 
-`coqui_agentic_peer::Error` (`#[non_exhaustive]`): `Channel(Failure)`, `Proof(String)`, `Identity(String)`, `Discovery(String)`. A message never quotes a key file.
+`coqui_agentic_peer::Error` (`#[non_exhaustive]`): `Channel(Failure)`, `Proof(String)`, `Identity(String)`, `Discovery(String)`, `OtherMethod { peer: Method, ours: Method }` (a responder seeing the other method's first message: report it as a method mismatch, never as a key to accept). A message never quotes a key file.
 
 ## Gotchas
 

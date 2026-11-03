@@ -23,6 +23,10 @@ use crate::Error;
 pub const MAX_PROOF_MESSAGE: usize = 3072;
 /// What a WebCrypto record adds to a message: the type byte and the tag.
 const WEBCRYPTO_OVERHEAD: usize = 17;
+/// The most of a message one Noise part holds: 65535 bytes less the tag and the type byte.
+const NOISE_PART: usize = 65_518;
+/// A Noise key change: its length field, type byte and tag.
+const NOISE_KEY_CHANGE: usize = 19;
 /// How often a live session asks whether its peer is still allowed.
 const RECHECK: Duration = Duration::from_secs(1);
 /// How every WebCrypto handshake message starts, which a Noise message of 32 bytes never does.
@@ -55,13 +59,18 @@ impl Method {
         }
     }
 
-    /// The length of the record a message of `message` bytes becomes in this method's session. A channel's limit for sealed
-    /// messages is set from it, never from the message length.
+    /// The longest record a message of `message` bytes can become in this method's session, whatever key limit its sender
+    /// runs. A channel's limit for sealed messages is set from it, never from the message length. Under Noise a sender may
+    /// change keys before any part of a record, each change 19 bytes, so this is `noise::record_length` and 19 more per part.
     #[must_use]
     pub const fn record_length(self, message: usize) -> usize {
         match self {
             Self::WebCrypto => message.saturating_add(WEBCRYPTO_OVERHEAD),
-            Self::Noise => noise::record_length(message),
+            Self::Noise => {
+                let parts = message.div_ceil(NOISE_PART);
+                let parts = if parts == 0 { 1 } else { parts };
+                noise::record_length(message).saturating_add(parts.saturating_mul(NOISE_KEY_CHANGE))
+            }
         }
     }
 
@@ -123,8 +132,15 @@ impl From<noise::Identity> for Identity {
     }
 }
 
-fn identity_failed(error: impl fmt::Display) -> Error {
-    Error::Identity(error.to_string())
+/// The error and each cause beneath it, so a file that cannot be written says why.
+fn identity_failed(error: impl std::error::Error) -> Error {
+    let mut text = error.to_string();
+    let mut cause = error.source();
+    while let Some(next) = cause {
+        text = format!("{text}: {next}");
+        cause = next.source();
+    }
+    Error::Identity(text)
 }
 
 impl Identity {
@@ -190,10 +206,11 @@ impl Identity {
         let identity = Self::generate(method)?;
         match identity.write_new(path) {
             Ok(()) => Ok(identity),
-            // Another process made it first: theirs is the identity.
-            Err(_) => Self::read(path)?
-                .ok_or_else(|| Error::Identity("the identity could not be written".to_owned()))?
-                .of_method(method),
+            // Another process made it first: theirs is the identity. Otherwise the write's own error says why.
+            Err(error) => match Self::read(path) {
+                Ok(Some(found)) => found.of_method(method),
+                _ => Err(error),
+            },
         }
     }
 
@@ -380,13 +397,18 @@ impl Proof {
         }
     }
 
-    /// The longest handshake message WebCrypto takes. Noise's messages have fixed lengths, so it has no such setting and this
-    /// leaves it as it is.
-    #[must_use]
-    pub fn with_max_message(self, bytes: usize) -> Self {
+    /// The longest handshake message WebCrypto takes.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Proof`] under Noise, whose handshake messages have fixed lengths and no such setting.
+    pub fn with_max_message(self, bytes: usize) -> Result<Self, Error> {
         match self {
-            Self::WebCrypto(method) => Self::WebCrypto(method.with_max_message(bytes)),
-            Self::Noise(method) => Self::Noise(method),
+            Self::WebCrypto(method) => Ok(Self::WebCrypto(method.with_max_message(bytes))),
+            Self::Noise(_) => Err(Error::Proof(
+                "noise has no handshake message limit: its messages are 32, 96 and 64 bytes"
+                    .to_owned(),
+            )),
         }
     }
 
@@ -759,9 +781,10 @@ fn drive<H: Handshake, C: Channel>(
             check_size(&message).and_then(|()| proof.receive(&message).map_err(proof_failed))
         {
             return Err(match other_method(ours, &message).filter(|_| answering) {
-                Some(theirs) => Error::Proof(format!(
-                    "the peer proves by {theirs}, and this endpoint only by {ours}: a method is chosen per endpoint, never per connection"
-                )),
+                Some(theirs) => match ours.parse() {
+                    Ok(ours) => Error::OtherMethod { peer: theirs, ours },
+                    Err(_) => error,
+                },
                 None => error,
             });
         }
@@ -1116,12 +1139,16 @@ mod tests {
             // The largest message under the limit seals to a record the limit just takes.
             sealed.send(&vec![7; MESSAGE]).unwrap();
             let taken = link.taken.lock().unwrap().clone();
-            assert_eq!(taken[0].len(), method.record_length(MESSAGE));
+            // At the default key limit no change of key comes into one record this size: what it holds is the plain length.
+            assert!(taken[0].len() <= method.record_length(MESSAGE));
+            if method == Method::Noise {
+                assert_eq!(taken[0].len(), coqui_peer_noise::record_length(MESSAGE));
+            }
             assert_eq!(opened(theirs, &taken)[0].len(), MESSAGE);
         }
         assert_eq!(Method::WebCrypto.record_length(10), 27);
-        // Noise adds 19 bytes per 65,518: 4,883 at 16 MiB.
-        assert_eq!(Method::Noise.record_length(MESSAGE), MESSAGE + 4_883);
+        // Noise adds 19 bytes per 65,518, and as much again for key changes: 9,766 at 16 MiB.
+        assert_eq!(Method::Noise.record_length(MESSAGE), MESSAGE + 9_766);
     }
 
     #[test]
@@ -1167,9 +1194,11 @@ mod tests {
             (Method::Noise, Method::WebCrypto),
         ] {
             let (dialed, answered) = across(dialing, answering);
-            let Err(Error::Proof(why)) = answered else {
+            let Err(Error::OtherMethod { peer, ours }) = answered else {
                 panic!("{answering} answered {dialing}: {answered:?}");
             };
+            assert_eq!((peer, ours), (dialing, answering));
+            let why = Error::OtherMethod { peer, ours }.to_string();
             assert!(
                 why.contains(&format!("the peer proves by {dialing}"))
                     && why.contains(&format!("only by {answering}")),
@@ -1268,5 +1297,62 @@ mod tests {
         assert!(matches!(webcrypto.with_rekey(true), Err(Error::Proof(_))));
         let noise = Proof::new(Identity::generate(Method::Noise).unwrap());
         assert_eq!(noise.with_rekey(false).unwrap().weakened().len(), 1);
+    }
+
+    #[test]
+    fn a_record_fits_the_limit_whatever_key_limit_its_sender_runs() {
+        const MESSAGE: usize = 16 * 1024 * 1024;
+        let dialer = Identity::generate(Method::Noise).unwrap();
+        let answerer = Identity::generate(Method::Noise).unwrap();
+        let (dialer_id, answerer_id) = (dialer.peer_id(), answerer.peer_id());
+        // A sender changing keys every MiB puts a key change in front of many parts of one record.
+        let dialing = Proof::new(dialer)
+            .with_key_limit(1 << 20)
+            .with_responders(Trust::pinned([answerer_id]));
+        let answering = Proof::new(answerer).with_initiators(Trust::pinned([dialer_id]));
+        let (ours, theirs) = wires();
+        let ours = thread::scope(|scope| {
+            let answer = scope.spawn(|| prove(&answering, &theirs, LIMIT, 1 << 20).unwrap());
+            let dialed = prove_out(&dialing, &ours, LIMIT, 1 << 20).unwrap().session;
+            drop(answer.join().unwrap());
+            dialed
+        });
+        let link = Fills::default();
+        let sealed = Sealed::new(&link, ours);
+        sealed.send(&vec![7; MESSAGE]).unwrap();
+        let taken = link.taken.lock().unwrap().clone();
+        assert!(
+            taken[0].len() <= Method::Noise.record_length(MESSAGE),
+            "{} over",
+            taken[0].len() - Method::Noise.record_length(MESSAGE)
+        );
+    }
+
+    #[test]
+    fn an_identity_that_cannot_be_written_says_why() {
+        let dir = std::env::temp_dir().join(format!(
+            "coqui-agentic-peer-unwritable-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A file where the parent directory should be.
+        std::fs::write(dir.join("parent"), b"").unwrap();
+        let path = dir.join("parent").join("identity");
+        let Err(Error::Identity(why)) = Identity::open_or_create(&path, Method::Noise) else {
+            panic!("an identity was made under a file");
+        };
+        assert!(!why.contains("could not be written"), "{why}");
+        // The system's own words, which differ by platform: Windows cannot find the path, Linux finds no directory.
+        assert!(why.contains("(os error "), "{why} gives no system error");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_handshake_limit_noise_cannot_apply_is_refused() {
+        let noise = Proof::new(Identity::generate(Method::Noise).unwrap());
+        assert!(matches!(noise.with_max_message(4096), Err(Error::Proof(_))));
+        let webcrypto = Proof::new(Identity::generate(Method::WebCrypto).unwrap());
+        assert!(webcrypto.with_max_message(4096).is_ok());
     }
 }

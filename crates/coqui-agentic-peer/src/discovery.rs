@@ -116,7 +116,7 @@ pub struct Advertisement {
     pub tls: bool,
     /// The peer id its proof shows, when it has one.
     pub peer: Option<String>,
-    /// The method its proof runs: WebCrypto unless set.
+    /// The method its proof runs: [`Method::DEFAULT`] unless set.
     pub method: Method,
     /// A UDP port serving WebTransport.
     pub webtransport: Option<u16>,
@@ -143,7 +143,7 @@ impl Advertisement {
             label: label.to_owned(),
             tls,
             peer: None,
-            method: Method::WebCrypto,
+            method: Method::DEFAULT,
             webtransport: None,
             webtransport_hash: None,
             host: None,
@@ -983,7 +983,7 @@ mod tests {
             );
         }
         let advertised = Advertisement::new("Mine", true).unwrap();
-        assert_eq!(advertised.txt()["method"], "webcrypto");
+        assert_eq!(advertised.txt()["method"], Method::DEFAULT.name());
         let advertised = advertised.with_method(Method::Noise);
         assert_eq!(advertised.txt()["method"], "noise");
         let descriptor = |method: &str| {
@@ -1102,5 +1102,13 @@ mod tests {
         );
         let long = format!("ws://127.0.0.1:1/{}", "\u{e9}".repeat(200));
         assert!(candidate_from_descriptor(&descriptor(&long)).is_none());
+    }
+
+    #[test]
+    fn an_advertisement_names_the_default_method_unless_told() {
+        assert_eq!(
+            Advertisement::new("Mine", true).unwrap().method,
+            Method::DEFAULT
+        );
     }
 }

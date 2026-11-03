@@ -2,8 +2,8 @@
 //! other paths, and a program that does has a pairing of its own.
 //!
 //! Each method's identity has its own file, so one key is never used by both, and the trust store holds keys of either, each
-//! under its method. A program that names no method gets the identity this user already has; a user with none gets
-//! [`Method::DEFAULT`]'s, and one with both has to choose.
+//! under its method. The home records the method last named, or the first identity's, in [`METHOD_FILE`]; a program that
+//! names no method gets that one. A user with no identity gets [`Method::DEFAULT`]'s.
 
 use std::path::{Path, PathBuf};
 
@@ -14,6 +14,8 @@ use crate::auth::{Identity, Method};
 
 /// Overrides the whole directory, for a second identity on one account, and for tests.
 pub const HOME_ENV: &str = "COQUI_AGENTIC_PEER_HOME";
+/// The file in the home holding the method a program naming none proves by: `noise` or `webcrypto`.
+pub const METHOD_FILE: &str = "method";
 
 fn var(name: &str) -> Option<PathBuf> {
     std::env::var_os(name)
@@ -116,10 +118,44 @@ pub fn identity(path: Option<&Path>, method: Option<Method>) -> Result<Identity,
     in_home(&home, method)
 }
 
+/// The method this user's home records, if it records one.
+///
+/// # Errors
+///
+/// [`Error::Identity`] when no directory can be worked out, or the file cannot be read or names no method.
+pub fn chosen_method() -> Result<Option<Method>, Error> {
+    let home =
+        dir().ok_or_else(|| Error::Identity("no home directory for this user".to_owned()))?;
+    chosen(&home)
+}
+
+fn chosen(home: &Path) -> Result<Option<Method>, Error> {
+    match std::fs::read_to_string(home.join(METHOD_FILE)) {
+        Ok(text) => text.trim().parse().map(Some).map_err(|_| {
+            Error::Identity(format!(
+                "{METHOD_FILE} in this user's home names no method: write noise or webcrypto"
+            ))
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(Error::Identity(format!(
+            "{METHOD_FILE} could not be read: {error}"
+        ))),
+    }
+}
+
+fn choose(home: &Path, method: Method) -> Result<(), Error> {
+    if chosen(home).ok().flatten() == Some(method) {
+        return Ok(());
+    }
+    std::fs::create_dir_all(home)
+        .and_then(|()| std::fs::write(home.join(METHOD_FILE), format!("{method}\n")))
+        .map_err(|error| Error::Identity(format!("{METHOD_FILE} could not be written: {error}")))
+}
+
 fn in_home(home: &Path, method: Option<Method>) -> Result<Identity, Error> {
-    let method = match method {
-        Some(method) => method,
-        None => {
+    let method = match (method, chosen(home)?) {
+        (Some(method), _) | (None, Some(method)) => method,
+        (None, None) => {
             let held: Vec<Method> = Method::ALL
                 .into_iter()
                 .filter(|method| home.join(identity_file(*method)).exists())
@@ -128,14 +164,16 @@ fn in_home(home: &Path, method: Option<Method>) -> Result<Identity, Error> {
                 [] => Method::DEFAULT,
                 [only] => *only,
                 _ => {
-                    return Err(Error::Identity(
-                        "this user has an identity of each method: name the one to use".to_owned(),
-                    ));
+                    return Err(Error::Identity(format!(
+                        "this user has an identity of each method: name the one to use, or write it in {METHOD_FILE}"
+                    )));
                 }
             }
         }
     };
-    Identity::open_or_create(&home.join(identity_file(method)), method)
+    let identity = Identity::open_or_create(&home.join(identity_file(method)), method)?;
+    choose(home, method)?;
+    Ok(identity)
 }
 
 /// The trust store at `path`, or this user's. It holds keys of both methods, each under its own.
@@ -202,12 +240,41 @@ mod tests {
             in_home(&old, Some(Method::WebCrypto)).unwrap().peer_id(),
             kept.peer_id()
         );
-        // With both, nothing picks one.
-        let Err(Error::Identity(why)) = in_home(&old, None) else {
-            panic!("a method was picked for a user holding both");
-        };
-        assert!(why.contains("each method"), "{why}");
+        // With both, the one named last, WebCrypto just above, is this home's.
+        assert_eq!(in_home(&old, None).unwrap().peer_id(), kept.peer_id());
         std::fs::remove_dir_all(&home).unwrap();
+        std::fs::remove_dir_all(&old).unwrap();
+    }
+
+    #[test]
+    fn a_home_remembers_the_method_named_last_and_the_first_one_made() {
+        let home = fresh("chosen");
+        // The first identity made records its method.
+        let first = in_home(&home, Some(Method::WebCrypto)).unwrap();
+        assert_eq!(in_home(&home, None).unwrap().peer_id(), first.peer_id());
+        // Moving: naming the other method makes its identity and makes it this home's choice.
+        let moved = in_home(&home, Some(Method::Noise)).unwrap();
+        assert_eq!(in_home(&home, None).unwrap().peer_id(), moved.peer_id());
+        assert_eq!(chosen(&home).unwrap(), Some(Method::Noise));
+        // The old one is still there, by name.
+        assert_eq!(
+            in_home(&home, Some(Method::WebCrypto)).unwrap().peer_id(),
+            first.peer_id()
+        );
+        assert_eq!(in_home(&home, None).unwrap().method(), Method::WebCrypto);
+        std::fs::remove_dir_all(&home).unwrap();
+
+        // A home from before the choice was kept, holding both, still refuses to pick.
+        let old = fresh("chosen-old");
+        Identity::open_or_create(
+            &old.join(identity_file(Method::WebCrypto)),
+            Method::WebCrypto,
+        )
+        .unwrap();
+        Identity::open_or_create(&old.join(identity_file(Method::Noise)), Method::Noise).unwrap();
+        assert!(in_home(&old, None).is_err());
+        std::fs::write(old.join(METHOD_FILE), "something\n").unwrap();
+        assert!(matches!(in_home(&old, None), Err(Error::Identity(_))));
         std::fs::remove_dir_all(&old).unwrap();
     }
 }

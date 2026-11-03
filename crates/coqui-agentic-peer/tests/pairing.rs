@@ -166,13 +166,10 @@ fn a_joiner_of_the_other_method_is_refused_and_nobody_is_stored() {
             (joined, responding.join().unwrap())
         });
         let (responded, server_store) = responded;
-        let Err(Error::Proof(why)) = responded else {
+        let Err(Error::OtherMethod { peer, ours }) = responded else {
             panic!("{responding} paired with {joining}: {responded:?}");
         };
-        assert!(
-            why.contains(&format!("the peer proves by {joining}")),
-            "{why}"
-        );
+        assert_eq!((peer, ours), (joining, responding));
         assert!(joined.is_err());
         assert!(accepted_methods(&server_store).is_empty());
         assert!(accepted_methods(&client_store).is_empty());

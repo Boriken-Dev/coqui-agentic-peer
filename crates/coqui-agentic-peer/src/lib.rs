@@ -31,6 +31,13 @@ pub enum Error {
     Identity(String),
     /// A peer could not be advertised or searched for, or the companion could not be installed.
     Discovery(String),
+    /// The peer's first message shows it proves by another method than this endpoint, which never tries that one.
+    OtherMethod {
+        /// The method the peer's message shows.
+        peer: auth::Method,
+        /// This endpoint's.
+        ours: auth::Method,
+    },
 }
 
 impl fmt::Display for Error {
@@ -40,6 +47,10 @@ impl fmt::Display for Error {
             Self::Proof(why) => write!(f, "the peer was not proven: {why}"),
             Self::Identity(why) => write!(f, "the identity could not be used: {why}"),
             Self::Discovery(why) => write!(f, "discovery failed: {why}"),
+            Self::OtherMethod { peer, ours } => write!(
+                f,
+                "the peer was not proven: the peer proves by {peer}, and this endpoint only by {ours}: a method is chosen per endpoint, never per connection"
+            ),
         }
     }
 }
