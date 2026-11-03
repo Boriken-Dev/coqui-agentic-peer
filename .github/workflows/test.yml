@@ -39,9 +39,20 @@ jobs:
           toolchain: ${{ matrix.toolchain }}
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # The JavaScript joiner of the pairing test, at the revision crates/coqui-agentic-peer/Cargo.toml pins.
+      - uses: actions/checkout@v4
+        with:
+          repository: Boriken-Dev/coqui-peer-noise
+          ref: 8777403807e3ad6eb6fddc98d9b5b6753bb0e424
+          path: peer-noise
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --all-features
+        env:
+          COQUI_AGENTIC_PEER_TEST_NOISE: ${{ github.workspace }}/peer-noise/bindings/js/coqui-peer-noise/src/index.mjs
       - run: cargo doc --workspace --no-deps --all-features
         env:
           RUSTDOCFLAGS: -D warnings
