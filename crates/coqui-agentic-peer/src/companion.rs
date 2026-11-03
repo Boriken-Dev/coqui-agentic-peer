@@ -312,6 +312,7 @@ mod tests {
             label: "\"".repeat(63),
             url: format!("wss://{}:65535/{}", "h".repeat(253), "%".repeat(127)),
             peer: Some(format!("sha256:{}", "0".repeat(64))),
+            method: crate::auth::Method::WebCrypto,
             source: discovery::Source::Network,
             webtransport: Some(65535),
             webtransport_hash: Some(format!("sha256:{}", "0".repeat(64))),

@@ -13,6 +13,14 @@ A link is one proven, sealed connection between two peers, carrying named stream
 
 A stream carries a protocol's messages unchanged. The link adds finding and reaching a peer, never a dialect.
 
+## The proof's method
+
+The proof is one of two methods, chosen per endpoint and never negotiated on a connection: [`noise`](https://github.com/Boriken-Dev/coqui-peer-noise), `Noise_XX_25519_AESGCM_SHA256` with PIN pairing in the browser, or [`webcrypto`](https://github.com/Boriken-Dev/coqui-peer-webcrypto), P-256, for a browser whose WebCrypto has no X25519. Nothing on the wire says which: a peer running the other method fails the handshake, and nothing falls back. A peer id is the hash of a key of one type, so it can be proved only by its own method, and a client that stores the method with the id cannot be talked into the other.
+
+An identity is a key of one method, and is never used by the other. A discovery record names its method in `method`; one that names none is `webcrypto`'s, which was the only method before records named one.
+
+Each record of a session is longer than its message by what its method adds: 17 bytes under `webcrypto`; under `noise` 19 bytes for every 65,518 bytes of message or part of it, so 19 up to 65,518 and 4,883 at 16 MiB. A transport's frame limit is set from that length, never from the message's.
+
 ## Frames
 
 Each message on the link is one frame:

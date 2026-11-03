@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 use url::{Host, Url};
 
 use crate::Error;
+use crate::auth::Method;
 
 /// The DNS-SD service type, provisional until `acp-agent` is registered with IANA.
 pub const SERVICE_TYPE: &str = "_acp-agent._tcp.local.";
@@ -71,6 +72,9 @@ pub struct Candidate {
     pub url: String,
     /// The peer id it claims, if it claimed a well-formed one.
     pub peer: Option<String>,
+    /// The method that key proves by, as the record says: a record that names none is WebCrypto's, the only method before
+    /// records named one. A false method only fails the proof, since a peer id names a key of one type.
+    pub method: Method,
     /// Where it was found.
     pub source: Source,
     /// A UDP port claimed to serve WebTransport on the same host.
@@ -92,6 +96,7 @@ impl Candidate {
             "label": self.label,
             "url": self.url,
             "peer": self.peer,
+            "method": self.method.name(),
             "source": self.source.name(),
             "webtransport": self.webtransport,
             "webtransportHash": self.webtransport_hash,
@@ -111,6 +116,8 @@ pub struct Advertisement {
     pub tls: bool,
     /// The peer id its proof shows, when it has one.
     pub peer: Option<String>,
+    /// The method its proof runs: WebCrypto unless set.
+    pub method: Method,
     /// A UDP port serving WebTransport.
     pub webtransport: Option<u16>,
     /// The hash of the certificate it serves, when a browser can pin that.
@@ -136,6 +143,7 @@ impl Advertisement {
             label: label.to_owned(),
             tls,
             peer: None,
+            method: Method::WebCrypto,
             webtransport: None,
             webtransport_hash: None,
             host: None,
@@ -147,6 +155,13 @@ impl Advertisement {
     #[must_use]
     pub fn with_peer(mut self, peer: Option<String>) -> Self {
         self.peer = peer;
+        self
+    }
+
+    /// The method its proof runs, which a client connects by.
+    #[must_use]
+    pub const fn with_method(mut self, method: Method) -> Self {
+        self.method = method;
         self
     }
 
@@ -195,6 +210,7 @@ impl Advertisement {
             ("txtvers".to_owned(), "1".to_owned()),
             ("proto".to_owned(), "acp".to_owned()),
             ("path".to_owned(), DEFAULT_PATH.to_owned()),
+            ("method".to_owned(), self.method.name().to_owned()),
         ]);
         if self.tls {
             txt.insert("tls".to_owned(), "1".to_owned());
@@ -259,6 +275,11 @@ fn clean_path(raw: Option<&str>) -> Option<String> {
             .bytes()
             .all(|byte| byte.is_ascii_graphic() && byte != b'#');
     fine.then(|| path.to_owned())
+}
+
+/// A record's method: none named is WebCrypto's; one this version does not know makes the record unusable.
+fn clean_method(raw: Option<&str>) -> Option<Method> {
+    raw.map_or(Some(Method::WebCrypto), |name| name.parse().ok())
 }
 
 fn clean_offers(raw: Option<&str>) -> Vec<String> {
@@ -353,6 +374,7 @@ pub fn candidate_from(record: &Record<'_>) -> Option<Candidate> {
     }
     let label = clean_label(record.instance)?;
     let peer = clean_peer(txt("peer"))?;
+    let method = clean_method(txt("method"))?;
     let path = clean_path(txt("path"))?;
     let host = record.host.trim_end_matches('.');
     let authority = if host.to_ascii_lowercase().ends_with(".local") || !valid_host(host) {
@@ -376,6 +398,7 @@ pub fn candidate_from(record: &Record<'_>) -> Option<Candidate> {
         label,
         url: url.to_string(),
         peer: Some(peer),
+        method,
         source: Source::Network,
         webtransport: txt("wt")
             .and_then(|port| port.parse().ok())
@@ -459,6 +482,10 @@ fn candidate_from_descriptor(text: &str) -> Option<Candidate> {
         label: clean_label(value.get("label")?.as_str()?)?,
         url: url.to_string(),
         peer: clean_peer(value.get("peer").and_then(Value::as_str)),
+        method: match value.get("method") {
+            None | Some(Value::Null) => Method::WebCrypto,
+            Some(name) => name.as_str()?.parse().ok()?,
+        },
         source: Source::ThisMachine,
         webtransport: value
             .get("wt")
@@ -713,6 +740,7 @@ fn write_descriptor(advertisement: &Advertisement, bound: SocketAddr) -> Result<
         "label": advertisement.label,
         "url": format!("{scheme}://{bound}{DEFAULT_PATH}"),
         "peer": advertisement.peer,
+        "method": advertisement.method.name(),
         "wt": advertisement.webtransport,
         "wth": advertisement.webtransport_hash,
         "offers": (!advertisement.offers.is_empty()).then(|| advertisement.offers.join(",")),
@@ -933,6 +961,54 @@ mod tests {
         assert!(candidate_from_descriptor(&descriptor("ws://10.0.0.5:1/acp")).is_none());
         assert!(candidate_from_descriptor(&descriptor("http://127.0.0.1:1/")).is_none());
         assert!(candidate_from_descriptor("not json").is_none());
+    }
+
+    #[test]
+    fn a_record_names_its_method_and_one_naming_none_is_webcrypto() {
+        let found = read("Mine", "acp-1.local.", &["10.0.0.5"], 8765, GOOD).unwrap();
+        assert_eq!(found.method, Method::WebCrypto);
+        assert_eq!(found.to_json()["method"], "webcrypto");
+        for (name, method) in [("noise", Method::Noise), ("webcrypto", Method::WebCrypto)] {
+            let keys = [GOOD, &[("method", name)]].concat();
+            let found = read("Mine", "acp-1.local.", &["10.0.0.5"], 8765, &keys).unwrap();
+            assert_eq!(found.method, method);
+            assert_eq!(found.to_json()["method"], name);
+        }
+        // A method this version cannot run is a record it cannot use.
+        for name in ["", "Noise", "tls", "noise,webcrypto"] {
+            let keys = [GOOD, &[("method", name)]].concat();
+            assert!(
+                read("Mine", "acp-1.local.", &["10.0.0.5"], 8765, &keys).is_none(),
+                "{name}"
+            );
+        }
+        let advertised = Advertisement::new("Mine", true).unwrap();
+        assert_eq!(advertised.txt()["method"], "webcrypto");
+        let advertised = advertised.with_method(Method::Noise);
+        assert_eq!(advertised.txt()["method"], "noise");
+        let descriptor = |method: &str| {
+            format!(
+                r#"{{"txtvers":1,"proto":"acp","label":"x","url":"ws://127.0.0.1:1/acp"{method}}}"#
+            )
+        };
+        assert_eq!(
+            candidate_from_descriptor(&descriptor("")).unwrap().method,
+            Method::WebCrypto
+        );
+        assert_eq!(
+            candidate_from_descriptor(&descriptor(r#","method":null"#))
+                .unwrap()
+                .method,
+            Method::WebCrypto
+        );
+        assert_eq!(
+            candidate_from_descriptor(&descriptor(r#","method":"noise""#))
+                .unwrap()
+                .method,
+            Method::Noise
+        );
+        assert!(candidate_from_descriptor(&descriptor(r#","method":"other""#)).is_none());
+        assert!(candidate_from_descriptor(&descriptor(r#","method":1"#)).is_none());
     }
 
     #[test]

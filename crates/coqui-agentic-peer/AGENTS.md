@@ -2,7 +2,7 @@
 
 Header-file-style reference for the `coqui-agentic-peer` crate, so it can be used without reading the source. It ships inside the package and is self-contained.
 
-No Cargo features. MSRV Rust 1.89. Version `0.0.0-alpha.0`, not published. It depends on `coqui-web`, `coqui-peer`, `coqui-peer-webcrypto`, `mdns-sd`, `serde_json` and `url`. No `unsafe` code. Public modules: `auth`, `companion`, `discovery`, `forward`, `home`, `link`, `mcp_offer`, `mux`, `pairing`, `peers`.
+No Cargo features. MSRV Rust 1.89. Version `0.0.0-alpha.0`, not published. It depends on `coqui-web`, `coqui-peer`, `coqui-peer-webcrypto` and `coqui-peer-noise` (each with `pin`), `mdns-sd`, `serde_json` and `url`. No `unsafe` code. Public modules: `auth`, `companion`, `discovery`, `forward`, `home`, `link`, `mcp_offer`, `mux`, `pairing`, `peers`.
 
 ## `coqui_agentic_peer::mux`
 
@@ -103,31 +103,66 @@ A host keeps peers in its own registry by implementing `PeerStore`, with no file
 ```rust
 pub const HOME_ENV: &str = "COQUI_AGENTIC_PEER_HOME";
 pub fn dir() -> Option<PathBuf>                        // $COQUI_AGENTIC_PEER_HOME, or coqui-agentic-peer under %LOCALAPPDATA%, $XDG_CONFIG_HOME or ~/.config
-pub fn identity_path() -> Result<PathBuf, Error>
+pub const fn identity_file(method: Method) -> &'static str          // "identity" (WebCrypto), "identity-noise" (Noise)
+pub fn identity_path(method: Method) -> Result<PathBuf, Error>
+pub fn methods() -> Result<Vec<Method>, Error>                      // the methods this user has an identity of
 pub fn store_path() -> Result<PathBuf, Error>
 pub fn grants_path() -> Result<PathBuf, Error>
-pub fn identity(path: Option<&Path>) -> Result<Identity, Error>    // this user's, or at path; made the first time it is needed
-pub fn store(path: Option<&Path>) -> Result<TrustStore, Error>     // this user's, or at path
+pub fn identity(path: Option<&Path>, method: Option<Method>) -> Result<Identity, Error>   // made the first time it is needed
+pub fn store(path: Option<&Path>) -> Result<TrustStore, Error>     // this user's, or at path; keys of both methods
 ```
 
-One identity and one trust store per user is what makes one pairing serve every program and capability.
+One identity per method and one trust store per user is what makes one pairing serve every program and capability. `identity`: with `path`, the key there, whose type is its method, or a new one of `method` (else `Method::DEFAULT`); without, this user's identity of `method`, or with no method the one this user has, a new `Method::DEFAULT` one when they have none, and `Error::Identity` when they have one of each. A key of another method than the one named is refused, never replaced.
 
 ## `coqui_agentic_peer::auth`
 
 ```rust
 pub const MAX_PROOF_MESSAGE: usize = 3072;
-pub const RECORD_OVERHEAD: usize = 17;
+pub enum Method { WebCrypto, Noise }   // Copy, Eq, Hash, Display, FromStr ("webcrypto" | "noise", exactly); non_exhaustive
+pub const Method::DEFAULT: Method;     // what a new identity gets when nothing names a method
+pub const Method::ALL: [Method; 2];
+pub const fn Method::name(self) -> &'static str
+pub const fn Method::record_length(self, message: usize) -> usize   // WebCrypto: message + 17; Noise: message + 19 per 65,518 bytes or part
+pub fn Method::of_key(material: &KeyMaterial) -> Option<Method>
+
+pub enum Identity { WebCrypto(coqui_peer_webcrypto::Identity), Noise(coqui_peer_noise::Identity) }   // Clone, From both; Debug shows method and id; non_exhaustive
+pub fn Identity::generate(method: Method) -> Result<Identity, Error>
+pub fn Identity::read(path: &Path) -> Result<Option<Identity>, Error>      // the key's type is its method
+pub fn Identity::write_new(&self, path: &Path) -> Result<(), Error>       // never replaces; 0600 on Unix
+pub fn Identity::open_or_create(path: &Path, method: Method) -> Result<Identity, Error>   // a key of another method there is refused
+pub fn Identity::of_method(self, method: Method) -> Result<Identity, Error>
+pub const fn Identity::method(&self) -> Method
+pub fn Identity::peer_id(&self) -> PeerId
+pub fn Identity::key_material(&self) -> KeyMaterial
 pub fn read_identity(path: &Path) -> Result<Identity, Error>
-pub fn create_identity(path: &Path) -> Result<PeerId, Error>
-pub fn prove<M: Method, C: Channel>(method: &M, channel: &C, limit: Duration, max_message: usize) -> Result<Established<<M::Handshake as Handshake>::Output>, Error>
-pub fn prove_out<M: Method, C: Channel>(method: &M, channel: &C, limit: Duration, max_message: usize) -> Result<Established<<M::Handshake as Handshake>::Output>, Error>
+pub fn create_identity(path: &Path, method: Method) -> Result<PeerId, Error>
+
+pub enum Trust { Pinned(BTreeSet<PeerId>), Store(TrustStore) }   // Clone; Trust::pinned(ids); non_exhaustive
+pub enum Proof { WebCrypto(WebCrypto), Noise(Noise) }            // Clone, From both; impl coqui_peer::Method: Handshake = ProofHandshake, Output = Session, Error = ProofError
+pub fn Proof::new(identity: Identity) -> Proof                   // identity's method, neither role yet
+pub fn Proof::with_responders(self, trust: Trust) -> Proof       // whom prove_out admits
+pub fn Proof::with_initiators(self, trust: Trust) -> Proof       // whom prove admits
+pub fn Proof::with_key_limit(self, bytes: u64) -> Proof          // WebCrypto's session limit, Noise's key limit; 2^38 by default, no floor
+pub fn Proof::with_rekey(self, rekey: bool) -> Result<Proof, Error>   // Noise: on by default; WebCrypto refuses true, having no key change
+pub fn Proof::with_max_message(self, bytes: usize) -> Proof      // WebCrypto's handshake message limit; Noise's messages have fixed lengths
+pub const fn Proof::method(&self) -> Method
+pub fn Proof::peer_id(&self) -> PeerId
+pub fn Proof::weakened(&self) -> Vec<Weakening>
+pub enum Session { WebCrypto(..), Noise(..) }                    // From both; method(), id(), export(label, out)
+pub enum ProofError { WebCrypto(..), Noise(..) }                 // the method's own error
+
+pub fn prove<M: coqui_peer::Method, C: Channel>(method: &M, channel: &C, limit: Duration, max_message: usize) -> Result<Established<<M::Handshake as Handshake>::Output>, Error>
+pub fn prove_out<M: coqui_peer::Method, C: Channel>(method: &M, channel: &C, limit: Duration, max_message: usize) -> Result<Established<<M::Handshake as Handshake>::Output>, Error>
 pub struct Sealed<'a, C>;   // impl Channel
-pub fn Sealed::new(channel: &'a C, session: Session) -> Sealed<'a, C>
+pub fn Sealed::new(channel: &'a C, session: impl Into<Session>) -> Sealed<'a, C>   // a session of either method
+pub const fn Sealed::method(&self) -> Method
 pub fn Sealed::with_check(self, allowed: impl Fn() -> bool + Send + Sync + 'a) -> Sealed<'a, C>   // a check that cannot tell must say no
 pub const fn Sealed::with_check_every(self, recheck: Duration) -> Sealed<'a, C>                    // a second unless set
 ```
 
-`create_identity` never replaces a file. `prove` answers and `prove_out` connects, within `limit`, refusing a message over 3072 bytes, and set the channel's limit to `max_message` before the proof's last message goes out. `Sealed` takes WebCrypto's `Session` today.
+An endpoint proves by one method, chosen when it is built: nothing on the wire names it and nothing negotiates it. A peer of the other method fails the handshake; the responder's `Error::Proof` names both methods, from the shape of the first message (WebCrypto's is JSON, Noise's 32 bytes), and the side that connected sees only the connection end, as `Error::Channel`. A peer id is the hash of a key of one type, so only its own method proves it: store the method with the id, and never fall back on a failure.
+
+`create_identity` never replaces a file. `prove` answers and `prove_out` connects, within `limit`, refusing a message over 3072 bytes, and set the channel's limit to `max_message` before the proof's last message goes out: size it with `Method::record_length`. `Sealed::set_max_message(n)` sets the channel's to its method's `record_length(n)`.
 
 ## `coqui_agentic_peer::pairing`
 
@@ -137,7 +172,7 @@ pub fn respond<C: Channel>(channel: &C, identity: &Identity, store: &TrustStore,
 pub fn join<C: Channel>(channel: &C, identity: &Identity, pin: Pin, store: &TrustStore, limit: Duration) -> Result<Paired, Error>
 ```
 
-PIN pairing over any channel in binary frames, with the PIN shown by the responder.
+PIN pairing over any channel in binary frames, with the PIN shown by the responder, by `identity`'s method: a joiner of the other method fails the handshake, and the responder's error names it. The key stored names its method, so the two then connect by it. A refusal's error says which: a wrong PIN, an expired one, a mode not offered. Under Noise, a joiner that proves itself and then says nothing is sent away as expired within `limit`, or Noise's own minute if that is sooner.
 
 ## `coqui_agentic_peer::discovery`
 
@@ -146,11 +181,12 @@ pub const SERVICE_TYPE: &str = "_acp-agent._tcp.local.";
 pub const DEFAULT_PATH: &str = "/acp";
 pub const DESCRIPTORS_ENV: &str = "COQUI_ACP_DESCRIPTORS";
 pub const MAX_CANDIDATES: usize = 64;
-pub struct Candidate { pub label: String, pub url: String, pub peer: Option<String>, pub source: Source, pub webtransport: Option<u16>, pub webtransport_hash: Option<String>, pub acp_versions: Vec<u32>, pub offers: Vec<String> }  // non_exhaustive
+pub struct Candidate { pub label: String, pub url: String, pub peer: Option<String>, pub method: Method, pub source: Source, pub webtransport: Option<u16>, pub webtransport_hash: Option<String>, pub acp_versions: Vec<u32>, pub offers: Vec<String> }  // non_exhaustive
 pub enum Source { Network, ThisMachine }  // non_exhaustive
 pub fn Candidate::to_json(&self) -> Value
 pub fn Advertisement::new(label: &str, tls: bool) -> Result<Advertisement, Error>
 pub fn Advertisement::with_peer(self, peer: Option<String>) -> Advertisement
+pub const fn Advertisement::with_method(self, method: Method) -> Advertisement   // WebCrypto unless set
 pub const fn Advertisement::with_webtransport(self, port: Option<u16>) -> Advertisement
 pub fn Advertisement::with_webtransport_hash(self, hash: Option<String>) -> Advertisement
 pub fn Advertisement::with_host(self, host: Option<String>) -> Result<Advertisement, Error>
@@ -163,7 +199,7 @@ pub fn descriptors_dir() -> Option<PathBuf>
 pub fn candidate_from(record: &Record<'_>) -> Option<Candidate>
 ```
 
-`candidate_from` reads an answer anyone on the link can send: it refuses this machine in any spelling, a link-local or multicast address, anything plain, no or a malformed key, and an unknown `txtvers` or `proto`, and cuts the label down, removing control and format characters. A descriptor may name only loopback, and may have no key. `read_descriptors` takes only regular files, spends at most 5 seconds, and believes nothing from a directory others can write to on Unix.
+A record and a descriptor carry `method`, and `to_json` gives it as `"method"`. One naming no method is WebCrypto's; one naming a method this version cannot run is skipped. `candidate_from` reads an answer anyone on the link can send: it refuses this machine in any spelling, a link-local or multicast address, anything plain, no or a malformed key, and an unknown `txtvers` or `proto`, and cuts the label down, removing control and format characters. A descriptor may name only loopback, and may have no key. `read_descriptors` takes only regular files, spends at most 5 seconds, and believes nothing from a directory others can write to on Unix.
 
 ## `coqui_agentic_peer::companion`
 
