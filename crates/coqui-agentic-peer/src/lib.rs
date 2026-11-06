@@ -24,7 +24,7 @@ use core::fmt;
 #[non_exhaustive]
 pub enum Error {
     /// The network channel failed.
-    Channel(coqui_web::Failure),
+    Channel(coqui_web_channel::Failure),
     /// A peer failed its identity proof, or its proof could not be completed.
     Proof(String),
     /// A key, identity file or trust store could not be used.
@@ -57,8 +57,8 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-impl From<coqui_web::Failure> for Error {
-    fn from(failure: coqui_web::Failure) -> Self {
+impl From<coqui_web_channel::Failure> for Error {
+    fn from(failure: coqui_web_channel::Failure) -> Self {
         Self::Channel(failure)
     }
 }

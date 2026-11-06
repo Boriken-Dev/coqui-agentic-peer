@@ -14,7 +14,7 @@ use coqui_agentic_peer::Error;
 use coqui_agentic_peer::auth::{Identity, Method, Proof, Sealed, Trust, prove, prove_out};
 use coqui_agentic_peer::pairing;
 use coqui_peer::TrustStore;
-use coqui_web::{Channel, Failure};
+use coqui_web_channel::{Channel, Failure};
 
 const SHORT: Duration = Duration::from_secs(20);
 

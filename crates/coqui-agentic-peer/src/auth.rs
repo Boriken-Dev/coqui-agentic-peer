@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use coqui_peer::{Established, Framing, Handshake, KeyMaterial, PeerId, TrustStore, Weakening};
 use coqui_peer_noise as noise;
 use coqui_peer_webcrypto as webcrypto;
-use coqui_web::{Channel, Failure};
+use coqui_web_channel::{Channel, Failure};
 
 use crate::Error;
 

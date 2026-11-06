@@ -23,7 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `Advertisement` names `Method::DEFAULT` unless told otherwise.
 - An identity file that cannot be written says why, with the system's error.
 - A responder refusing a peer of the other method answers `Error::OtherMethod`, so a host can say so rather than offer to accept the key.
-- coqui-web is pinned at `445007a`, the revision Guatiao's remote source pins, so a program using both has one `Channel` type.
+- The channel crate is `coqui-web-channel` (`coqui_web_channel::`), renamed from coqui-web, pinned at `0b5b05c`: coqui-web's `3b39c00` under its new name, the revision Guatiao's remote source pins, so a program using both has one `Channel` type.
 - A new identity is Noise's unless a method is named (`Method::DEFAULT`). An existing identity keeps its method: a WebCrypto home stays WebCrypto, and its paired peers keep working, until a person makes a Noise identity (`home::identity(None, Some(Method::Noise))`) and pairs again under it, since a key of one method is never the other's.
 - `auth::read_identity` answers an `auth::Identity` of whichever method the file's key is, and `auth::create_identity` takes the method.
 - `home::identity` takes the method: without one it keeps the identity this user has, and refuses to pick when they have one of each.

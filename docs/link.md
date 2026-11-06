@@ -6,7 +6,7 @@ A link is one proven, sealed connection between two peers, carrying named stream
 
 | Layer | What it does | Where |
 | --- | --- | --- |
-| Transport | WebTransport or WebSocket: a channel a browser can open | `coqui-web` |
+| Transport | WebTransport or WebSocket: a channel a browser can open | `coqui-web-channel` |
 | Proof | shows who holds a key, and seals every message after that with keys from the proof | a method of `coqui-peer` |
 | Streams | this page | `coqui-agentic-peer` |
 | Capabilities | ACP, A2A, MCP, or anything else: each protocol's own messages | each protocol's own library |
