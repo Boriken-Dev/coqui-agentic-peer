@@ -437,19 +437,50 @@ pub(crate) fn create_private_dir(dir: &Path) -> io::Result<()> {
     builder.create(dir)
 }
 
-/// A descriptor is believed only because nobody else can write one. A directory others can write to, which an override can name,
-/// loses that. Windows gives `%LOCALAPPDATA%` to its owner by default, and this does not read its ACLs.
-fn private_enough(dir: &Path) -> bool {
+/// What reading a descriptor directory found about who can write to it.
+///
+/// A descriptor is believed only because nobody else can write one, so a directory others can write to, which an override
+/// can name, loses that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DirectoryCheck {
+    /// Nobody but the owner can write to it.
+    Private,
+    /// Others can write to it (Unix: group or other write permission). Its descriptors were not read.
+    SharedWithOthers,
+    /// This platform's check was not made: on Windows `%LOCALAPPDATA%` belongs to its owner by default, and the ACLs are
+    /// not read. Its descriptors were read.
+    NotChecked,
+}
+
+/// The descriptors of a directory, and what was found about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Descriptors {
+    /// Agents on this machine that are still there; empty when the directory is [`DirectoryCheck::SharedWithOthers`].
+    pub candidates: Vec<Candidate>,
+    /// Who can write to the directory. Nothing is printed: the application decides what this means.
+    pub directory: DirectoryCheck,
+}
+
+fn check_directory(dir: &Path) -> DirectoryCheck {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
         if let Ok(metadata) = std::fs::metadata(dir) {
-            return metadata.permissions().mode() & 0o022 == 0;
+            return if metadata.permissions().mode() & 0o022 == 0 {
+                DirectoryCheck::Private
+            } else {
+                DirectoryCheck::SharedWithOthers
+            };
         }
+        DirectoryCheck::Private
     }
     #[cfg(not(unix))]
-    let _ = dir;
-    true
+    {
+        let _ = dir;
+        DirectoryCheck::NotChecked
+    }
 }
 
 fn is_loopback_host(url: &Url) -> bool {
@@ -511,19 +542,25 @@ fn listening(url: &str) -> bool {
         })
 }
 
-/// Agents on this machine that are still there. A descriptor nothing answers at is left over from a `serve` that was killed,
-/// and is removed.
+/// Agents on this machine that are still there, and what was found about the directory. A descriptor nothing answers at is
+/// left over from a `serve` that was killed, and is removed. A directory others can write to is not read.
 #[must_use]
-pub fn read_descriptors(dir: &Path) -> Vec<Candidate> {
-    if !private_enough(dir) {
-        eprintln!("descriptors ignored: others can write to their directory");
-        return Vec::new();
+pub fn read_descriptors(dir: &Path) -> Descriptors {
+    let directory = check_directory(dir);
+    let mut found = Vec::new();
+    if directory == DirectoryCheck::SharedWithOthers {
+        return Descriptors {
+            candidates: found,
+            directory,
+        };
     }
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
+        return Descriptors {
+            candidates: found,
+            directory,
+        };
     };
     let until = Instant::now() + DESCRIPTORS_BUDGET;
-    let mut found = Vec::new();
     let named = entries.flatten().filter(|entry| {
         entry
             .path()
@@ -559,13 +596,38 @@ pub fn read_descriptors(dir: &Path) -> Vec<Candidate> {
             let _ = std::fs::remove_file(&path);
         }
     }
-    found
+    Descriptors {
+        candidates: found,
+        directory,
+    }
+}
+
+/// What one search found, and what it could not do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Discovery {
+    /// The agents found, descriptors first.
+    pub candidates: Vec<Candidate>,
+    /// Who can write to the descriptor directory; `None` when no directory could be named.
+    pub directory: Option<DirectoryCheck>,
+    /// Why the link could not be searched, when it could not; the descriptors are still read.
+    pub network_error: Option<String>,
 }
 
 /// Searches the link for `wait`, and reads this user's descriptors. An mDNS service that cannot start leaves the descriptors.
+/// It prints nothing and says nothing of what it could not do; [`discover_report`] does.
 #[must_use]
 pub fn discover(wait: Duration) -> Vec<Candidate> {
-    let mut found = descriptors_dir().map_or_else(Vec::new, |dir| read_descriptors(&dir));
+    discover_report(wait).candidates
+}
+
+/// [`discover`], with what it found about the descriptor directory and why the link could not be searched.
+#[must_use]
+pub fn discover_report(wait: Duration) -> Discovery {
+    let read = descriptors_dir().map(|dir| read_descriptors(&dir));
+    let directory = read.as_ref().map(|read| read.directory);
+    let mut found = read.map_or_else(Vec::new, |read| read.candidates);
+    let mut network_error = None;
     match browse(wait) {
         Ok(network) => {
             for candidate in network {
@@ -580,9 +642,13 @@ pub fn discover(wait: Duration) -> Vec<Candidate> {
                 }
             }
         }
-        Err(error) => eprintln!("the network could not be searched: {error}"),
+        Err(error) => network_error = Some(error.to_string()),
     }
-    found
+    Discovery {
+        candidates: found,
+        directory,
+        network_error,
+    }
 }
 
 /// Searches the link for `wait`.
@@ -728,7 +794,7 @@ fn write_descriptor(advertisement: &Advertisement, bound: SocketAddr) -> Result<
     let dir = descriptors_dir()
         .ok_or_else(|| Error::Discovery("no directory for descriptors".to_owned()))?;
     create_private_dir(&dir).map_err(fail)?;
-    if !private_enough(&dir) {
+    if check_directory(&dir) == DirectoryCheck::SharedWithOthers {
         return Err(Error::Discovery(
             "others can write to the descriptor directory".to_owned(),
         ));
@@ -1110,5 +1176,35 @@ mod tests {
             Advertisement::new("Mine", true).unwrap().method,
             Method::DEFAULT
         );
+    }
+
+    fn scratch_directory(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("coqui-descriptors-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_others_can_write_is_reported_and_not_read() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = scratch_directory("shared");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let read = read_descriptors(&dir);
+        assert_eq!(read.directory, DirectoryCheck::SharedWithOthers);
+        assert!(read.candidates.is_empty());
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(read_descriptors(&dir).directory, DirectoryCheck::Private);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn a_platform_that_cannot_check_the_directory_says_so() {
+        let dir = scratch_directory("unchecked");
+        assert_eq!(read_descriptors(&dir).directory, DirectoryCheck::NotChecked);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

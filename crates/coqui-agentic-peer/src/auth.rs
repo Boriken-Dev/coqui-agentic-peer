@@ -12,7 +12,7 @@ use std::path::Path;
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use coqui_peer::{Established, Framing, Handshake, KeyMaterial, PeerId, TrustStore, Weakening};
+use coqui_peer::{Established, Framing, Handshake, KeyMaterial, NonDefault, PeerId, TrustStore};
 use coqui_peer_noise as noise;
 use coqui_peer_webcrypto as webcrypto;
 use coqui_web_channel::{Channel, Failure};
@@ -372,7 +372,7 @@ impl Proof {
     }
 
     /// What one key may carry in each direction: WebCrypto's session limit, Noise's key limit. The default is each method's
-    /// (2^38 bytes for both), with no floor; above it, [`Proof::weakened`] says so.
+    /// (2^38 bytes for both), with no floor; above it, [`Proof::non_defaults`] says so.
     #[must_use]
     pub fn with_key_limit(self, bytes: u64) -> Self {
         match self {
@@ -432,11 +432,18 @@ impl Proof {
 
     /// Every setting looser than its method's default, for the host to show.
     #[must_use]
-    pub fn weakened(&self) -> Vec<Weakening> {
+    pub fn non_defaults(&self) -> Vec<NonDefault> {
         match self {
-            Self::WebCrypto(method) => method.weakened(),
-            Self::Noise(method) => method.weakened(),
+            Self::WebCrypto(method) => method.non_defaults(),
+            Self::Noise(method) => method.non_defaults(),
         }
+    }
+
+    /// The old name of [`non_defaults`](Self::non_defaults).
+    #[deprecated(since = "0.0.0", note = "renamed to `non_defaults`")]
+    #[must_use]
+    pub fn weakened(&self) -> Vec<NonDefault> {
+        self.non_defaults()
     }
 }
 
@@ -1283,20 +1290,24 @@ mod tests {
     }
 
     #[test]
-    fn settings_are_each_methods_and_weakening_shows() {
+    fn settings_are_each_methods_and_non_defaults_show() {
         for method in Method::ALL {
             let proof = Proof::new(Identity::generate(method).unwrap());
-            assert!(proof.weakened().is_empty(), "{method}");
+            assert!(proof.non_defaults().is_empty(), "{method}");
             assert!(
-                !proof.clone().with_key_limit(u64::MAX).weakened().is_empty(),
+                !proof
+                    .clone()
+                    .with_key_limit(u64::MAX)
+                    .non_defaults()
+                    .is_empty(),
                 "{method}"
             );
-            assert!(proof.with_rekey(false).unwrap().weakened().len() <= 1);
+            assert!(proof.with_rekey(false).unwrap().non_defaults().len() <= 1);
         }
         let webcrypto = Proof::new(Identity::generate(Method::WebCrypto).unwrap());
         assert!(matches!(webcrypto.with_rekey(true), Err(Error::Proof(_))));
         let noise = Proof::new(Identity::generate(Method::Noise).unwrap());
-        assert_eq!(noise.with_rekey(false).unwrap().weakened().len(), 1);
+        assert_eq!(noise.with_rekey(false).unwrap().non_defaults().len(), 1);
     }
 
     #[test]
