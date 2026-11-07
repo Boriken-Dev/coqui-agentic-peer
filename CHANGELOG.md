@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking: a weakened setting is a non-default setting.** `Proof::weakened` is `non_defaults`, returning coqui-peer's
+  `NonDefault { setting, value, default }`; the old method stays one release as a deprecated alias.
+- **Breaking:** `discovery::read_descriptors` returns `Descriptors { candidates, directory }`, where `directory` is a
+  `DirectoryCheck` (`Private`, `SharedWithOthers`, `NotChecked`), instead of printing 'descriptors ignored' to standard
+  error. `discover` prints nothing either; `discover_report` returns the same finding and the reason the link could not be
+  searched. A library prints nothing: the application shows the finding.
+
 ### Added
 
 - The Noise method (`coqui-peer-noise`) beside WebCrypto, chosen per endpoint and never negotiated: `auth::Method`, `auth::Identity`, `auth::Proof`, `auth::Trust` and `auth::Session` hold either, `Sealed` takes a session of either, and `pairing` pairs by PIN under the identity's method. A peer of the other method is refused with an error naming both.

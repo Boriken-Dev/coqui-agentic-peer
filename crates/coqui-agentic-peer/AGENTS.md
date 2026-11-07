@@ -149,7 +149,7 @@ pub fn Proof::with_rekey(self, rekey: bool) -> Result<Proof, Error>   // Noise: 
 pub fn Proof::with_max_message(self, bytes: usize) -> Result<Proof, Error>   // WebCrypto's handshake message limit; Error::Proof under Noise, whose messages have fixed lengths
 pub const fn Proof::method(&self) -> Method
 pub fn Proof::peer_id(&self) -> PeerId
-pub fn Proof::weakened(&self) -> Vec<Weakening>
+pub fn Proof::non_defaults(&self) -> Vec<NonDefault>   // weakened(): a deprecated alias for one release
 pub enum Session { WebCrypto(..), Noise(..) }                    // From both; method(), id(), export(label, out)
 pub enum ProofError { WebCrypto(..), Noise(..) }                 // the method's own error
 
@@ -194,14 +194,18 @@ pub fn Advertisement::with_webtransport_hash(self, hash: Option<String>) -> Adve
 pub fn Advertisement::with_host(self, host: Option<String>) -> Result<Advertisement, Error>
 pub fn Advertisement::with_offers(self, offers: &[String]) -> Advertisement   // a hint, at most 16; the link's own document decides
 pub fn advertise(advertisement: &Advertisement, bound: SocketAddr) -> Result<Advertised, Error>   // withdrawn on drop
-pub fn discover(wait: Duration) -> Vec<Candidate>                 // descriptors, then the link; a failed mDNS start leaves the descriptors
+pub fn discover(wait: Duration) -> Vec<Candidate>                 // descriptors, then the link; a failed mDNS start leaves the descriptors; prints nothing
+pub fn discover_report(wait: Duration) -> Discovery               // the same, with the directory check and why the link could not be searched
+pub struct Discovery { pub candidates: Vec<Candidate>, pub directory: Option<DirectoryCheck>, pub network_error: Option<String> }   // non_exhaustive
 pub fn browse(wait: Duration) -> Result<Vec<Candidate>, Error>    // the link only
-pub fn read_descriptors(dir: &Path) -> Vec<Candidate>
+pub fn read_descriptors(dir: &Path) -> Descriptors
+pub struct Descriptors { pub candidates: Vec<Candidate>, pub directory: DirectoryCheck }   // non_exhaustive
+pub enum DirectoryCheck { Private, SharedWithOthers, NotChecked }   // non_exhaustive; NotChecked is every non-Unix platform, where the ACLs are not read
 pub fn descriptors_dir() -> Option<PathBuf>
 pub fn candidate_from(record: &Record<'_>) -> Option<Candidate>
 ```
 
-A record and a descriptor carry `method`, and `to_json` gives it as `"method"`. One naming no method is WebCrypto's; one naming a method this version cannot run is skipped. `candidate_from` reads an answer anyone on the link can send: it refuses this machine in any spelling, a link-local or multicast address, anything plain, no or a malformed key, and an unknown `txtvers` or `proto`, and cuts the label down, removing control and format characters. A descriptor may name only loopback, and may have no key. `read_descriptors` takes only regular files, spends at most 5 seconds, and believes nothing from a directory others can write to on Unix.
+A record and a descriptor carry `method`, and `to_json` gives it as `"method"`. One naming no method is WebCrypto's; one naming a method this version cannot run is skipped. `candidate_from` reads an answer anyone on the link can send: it refuses this machine in any spelling, a link-local or multicast address, anything plain, no or a malformed key, and an unknown `txtvers` or `proto`, and cuts the label down, removing control and format characters. A descriptor may name only loopback, and may have no key. `read_descriptors` takes only regular files, spends at most 5 seconds, and reads nothing from a directory others can write to on Unix: it returns no candidates and `DirectoryCheck::SharedWithOthers`, the finding the application shows (a directory nobody meant to loosen). It prints nothing. On Windows it returns `NotChecked` and reads the files.
 
 ## `coqui_agentic_peer::companion`
 
