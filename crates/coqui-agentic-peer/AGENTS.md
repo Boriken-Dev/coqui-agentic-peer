@@ -149,7 +149,7 @@ pub fn Proof::with_rekey(self, rekey: bool) -> Result<Proof, Error>   // Noise: 
 pub fn Proof::with_max_message(self, bytes: usize) -> Result<Proof, Error>   // WebCrypto's handshake message limit; Error::Proof under Noise, whose messages have fixed lengths
 pub const fn Proof::method(&self) -> Method
 pub fn Proof::peer_id(&self) -> PeerId
-pub fn Proof::non_defaults(&self) -> Vec<NonDefault>   // weakened(): a deprecated alias for one release
+pub fn Proof::non_defaults(&self) -> Vec<NonDefault>
 pub enum Session { WebCrypto(..), Noise(..) }                    // From both; method(), id(), export(label, out)
 pub enum ProofError { WebCrypto(..), Noise(..) }                 // the method's own error
 

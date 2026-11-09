@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - **Breaking: a weakened setting is a non-default setting.** `Proof::weakened` is `non_defaults`, returning coqui-peer's
-  `NonDefault { setting, value, default }`; the old method stays one release as a deprecated alias.
+  `NonDefault { setting, value, default }`; the old method is gone; nothing keeps an alias before a release without a pre-release tag.
 - **Breaking:** `discovery::read_descriptors` returns `Descriptors { candidates, directory }`, where `directory` is a
   `DirectoryCheck` (`Private`, `SharedWithOthers`, `NotChecked`), instead of printing 'descriptors ignored' to standard
   error. `discover` prints nothing either; `discover_report` returns the same finding and the reason the link could not be

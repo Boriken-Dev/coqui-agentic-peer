@@ -438,13 +438,6 @@ impl Proof {
             Self::Noise(method) => method.non_defaults(),
         }
     }
-
-    /// The old name of [`non_defaults`](Self::non_defaults).
-    #[deprecated(since = "0.0.0", note = "renamed to `non_defaults`")]
-    #[must_use]
-    pub fn weakened(&self) -> Vec<NonDefault> {
-        self.non_defaults()
-    }
 }
 
 /// A proof that failed, in its method's own words.
