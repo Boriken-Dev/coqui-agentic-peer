@@ -22,13 +22,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `Method::record_length`: the record a message becomes under each method, for sizing a channel's limit.
 - `home::identity_path(method)`, `home::identity_file` and `home::methods`: each method's identity has its own file, `identity` for WebCrypto as before and `identity-noise` for Noise.
 - `discovery`: a record and a descriptor name their `method`, and `Candidate::method` reads it; one that names none is WebCrypto's.
-- `Proof::with_key_limit` and `Proof::with_rekey`, each method's own setting with its default, and `Proof::weakened`.
+- `Proof::builder(identity)` with `responders`, `initiators`, `key_limit` and `rekey`, each method's own setting with its default, and `Proof::non_defaults`.
 
 ### Changed
 
 - `home` records the method a home proves by in `method`: the one named last, or the first identity's. A program naming none uses it, so a home holding an identity of each method after moving to Noise keeps working.
 - `Method::record_length` is the longest record at any key limit the sender runs, counting a change of key before each Noise part.
-- `Proof::with_max_message` answers a `Result`, refusing under Noise, which has no such limit.
+- `ProofBuilder::build` answers a `Result`: `max_message` is refused under Noise, which has no such limit, and `rekey(true)` under WebCrypto.
 - `Advertisement` names `Method::DEFAULT` unless told otherwise.
 - An identity file that cannot be written says why, with the system's error.
 - A responder refusing a peer of the other method answers `Error::OtherMethod`, so a host can say so rather than offer to accept the key.

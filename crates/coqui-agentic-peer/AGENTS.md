@@ -141,12 +141,15 @@ pub fn create_identity(path: &Path, method: Method) -> Result<PeerId, Error>
 
 pub enum Trust { Pinned(BTreeSet<PeerId>), Store(TrustStore) }   // Clone; Trust::pinned(ids); non_exhaustive
 pub enum Proof { WebCrypto(WebCrypto), Noise(Noise) }            // Clone, From both; impl coqui_peer::Method: Handshake = ProofHandshake, Output = Session, Error = ProofError
-pub fn Proof::new(identity: Identity) -> Proof                   // identity's method, neither role yet
-pub fn Proof::with_responders(self, trust: Trust) -> Proof       // whom prove_out admits
-pub fn Proof::with_initiators(self, trust: Trust) -> Proof       // whom prove admits
-pub fn Proof::with_key_limit(self, bytes: u64) -> Proof          // WebCrypto's session limit, Noise's key limit; 2^38 by default, no floor
-pub fn Proof::with_rekey(self, rekey: bool) -> Result<Proof, Error>   // Noise: on by default; WebCrypto refuses true, having no key change
-pub fn Proof::with_max_message(self, bytes: usize) -> Result<Proof, Error>   // WebCrypto's handshake message limit; Error::Proof under Noise, whose messages have fixed lengths
+pub fn Proof::builder(identity: Identity) -> ProofBuilder        // identity's method, neither role yet
+impl ProofBuilder {                                              // Clone, Debug, must_use
+    pub fn responders(self, trust: Trust) -> ProofBuilder          // whom prove_out admits
+    pub fn initiators(self, trust: Trust) -> ProofBuilder          // whom prove admits
+    pub fn key_limit(self, bytes: u64) -> ProofBuilder             // WebCrypto's session limit, Noise's key limit; 2^38 by default, no floor
+    pub fn rekey(self, rekey: bool) -> ProofBuilder                // Noise: on by default; WebCrypto refuses true at build, having no key change
+    pub fn max_message(self, bytes: usize) -> ProofBuilder         // WebCrypto's handshake message limit; refused at build under Noise, whose messages have fixed lengths
+    pub fn build(self) -> Result<Proof, Error>                     // Error::Proof for a setting the method does not have
+}
 pub const fn Proof::method(&self) -> Method
 pub fn Proof::peer_id(&self) -> PeerId
 pub fn Proof::non_defaults(&self) -> Vec<NonDefault>

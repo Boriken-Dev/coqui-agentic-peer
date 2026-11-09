@@ -119,10 +119,14 @@ fn a_pin_pairs_under_each_method_and_the_pinned_link_then_proves_by_it() {
         assert_eq!(accepted_methods(&client_store), [method.name()]);
 
         // Connecting again, each side trusts the other through its store, by the method it paired with.
-        let dialing =
-            Proof::new(client.clone()).with_responders(Trust::Store(client_store.clone()));
-        let answering =
-            Proof::new(server.clone()).with_initiators(Trust::Store(server_store.clone()));
+        let dialing = Proof::builder(client.clone())
+            .responders(Trust::Store(client_store.clone()))
+            .build()
+            .unwrap();
+        let answering = Proof::builder(server.clone())
+            .initiators(Trust::Store(server_store.clone()))
+            .build()
+            .unwrap();
         let (near, far) = wires();
         thread::scope(|scope| {
             let answer = scope.spawn(|| {
@@ -191,10 +195,12 @@ fn a_silent_noise_joiner_is_sent_away_within_the_responders_limit() {
     let responded = thread::scope(|scope| {
         let responding =
             scope.spawn(|| pairing::respond(&far, &server, &store, &desk, None, limit));
-        let method = coqui_peer_noise::PairingMethod::new(match client {
+        let method = coqui_peer_noise::PairingMethod::builder(match client {
             Identity::Noise(identity) => identity,
             _ => unreachable!(),
-        });
+        })
+        .build()
+        .unwrap();
         let joined = prove_out(&method, &near, SHORT, 4096).unwrap();
         let answered = responding.join().unwrap();
         drop(joined);
@@ -342,7 +348,10 @@ fn the_javascript_module_pairs_by_pin_with_a_rust_responder_then_proves_by_noise
         stdio: &stdio,
         number: 1,
     };
-    let answering = Proof::new(server).with_initiators(Trust::Store(store));
+    let answering = Proof::builder(server)
+        .initiators(Trust::Store(store))
+        .build()
+        .unwrap();
     let done = prove(&answering, &second, SHORT, 1 << 16).unwrap();
     assert_eq!(done.peer, joiner);
     let sealed = Sealed::new(&second, done.session);

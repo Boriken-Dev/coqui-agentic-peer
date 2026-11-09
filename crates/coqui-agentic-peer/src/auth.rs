@@ -343,72 +343,105 @@ impl From<noise::Noise> for Proof {
     }
 }
 
-impl Proof {
-    /// The proof of `identity`'s method, in neither role until a `with_` below.
-    #[must_use]
-    pub fn new(identity: Identity) -> Self {
-        match identity {
-            Identity::WebCrypto(identity) => Self::WebCrypto(webcrypto::WebCrypto::new(identity)),
-            Identity::Noise(identity) => Self::Noise(noise::Noise::new(identity)),
-        }
-    }
+/// Builds a [`Proof`]: [`Proof::builder`], the settings by name, then [`build`](Self::build).
+#[derive(Clone, Debug)]
+#[must_use]
+pub struct ProofBuilder {
+    inner: Inner,
+    refusal: Option<&'static str>,
+}
 
+#[derive(Clone, Debug)]
+enum Inner {
+    WebCrypto(webcrypto::WebCryptoBuilder),
+    Noise(noise::NoiseBuilder),
+}
+
+impl ProofBuilder {
     /// Whom [`prove_out`] admits.
-    #[must_use]
-    pub fn with_responders(self, trust: Trust) -> Self {
-        match self {
-            Self::WebCrypto(method) => Self::WebCrypto(method.with_responders(trust.webcrypto())),
-            Self::Noise(method) => Self::Noise(method.with_responders(trust.noise())),
-        }
+    pub fn responders(mut self, trust: Trust) -> Self {
+        self.inner = match self.inner {
+            Inner::WebCrypto(builder) => Inner::WebCrypto(builder.responders(trust.webcrypto())),
+            Inner::Noise(builder) => Inner::Noise(builder.responders(trust.noise())),
+        };
+        self
     }
 
     /// Whom [`prove`] admits.
-    #[must_use]
-    pub fn with_initiators(self, trust: Trust) -> Self {
-        match self {
-            Self::WebCrypto(method) => Self::WebCrypto(method.with_initiators(trust.webcrypto())),
-            Self::Noise(method) => Self::Noise(method.with_initiators(trust.noise())),
-        }
+    pub fn initiators(mut self, trust: Trust) -> Self {
+        self.inner = match self.inner {
+            Inner::WebCrypto(builder) => Inner::WebCrypto(builder.initiators(trust.webcrypto())),
+            Inner::Noise(builder) => Inner::Noise(builder.initiators(trust.noise())),
+        };
+        self
     }
 
     /// What one key may carry in each direction: WebCrypto's session limit, Noise's key limit. The default is each method's
-    /// (2^38 bytes for both), with no floor; above it, [`Proof::non_defaults`] says so.
-    #[must_use]
-    pub fn with_key_limit(self, bytes: u64) -> Self {
-        match self {
-            Self::WebCrypto(method) => Self::WebCrypto(method.with_session_limit(bytes)),
-            Self::Noise(method) => Self::Noise(method.with_key_limit(bytes)),
-        }
+    /// (2^38 bytes for both), with no floor; any other, [`Proof::non_defaults`] says so.
+    pub fn key_limit(mut self, bytes: u64) -> Self {
+        self.inner = match self.inner {
+            Inner::WebCrypto(builder) => Inner::WebCrypto(builder.session_limit(bytes)),
+            Inner::Noise(builder) => Inner::Noise(builder.key_limit(bytes)),
+        };
+        self
     }
 
-    /// Whether a sender changes its key at the limit by itself, which Noise does unless told not to. WebCrypto has no key change,
-    /// so it takes only `false`.
+    /// Whether a sender changes its key at the limit by itself, which Noise does unless told not to. WebCrypto has no key
+    /// change, so it takes only `false`: [`build`](Self::build) refuses `true` there.
+    pub fn rekey(mut self, rekey: bool) -> Self {
+        match self.inner {
+            Inner::WebCrypto(_) if rekey => {
+                self.refusal = Some("webcrypto has no key change: a session ends at its limit");
+            }
+            Inner::WebCrypto(_) => {}
+            Inner::Noise(builder) => self.inner = Inner::Noise(builder.rekey(rekey)),
+        }
+        self
+    }
+
+    /// The longest handshake message WebCrypto takes; [`build`](Self::build) refuses it under Noise, whose handshake messages
+    /// have fixed lengths and no such setting.
+    pub fn max_message(mut self, bytes: usize) -> Self {
+        match self.inner {
+            Inner::WebCrypto(builder) => self.inner = Inner::WebCrypto(builder.max_message(bytes)),
+            Inner::Noise(_) => {
+                self.refusal = Some(
+                    "noise has no handshake message limit: its messages are 32, 96 and 64 bytes",
+                );
+            }
+        }
+        self
+    }
+
+    /// The proof.
     ///
     /// # Errors
     ///
-    /// [`Error::Proof`] for `true` under WebCrypto, which has no key change.
-    pub fn with_rekey(self, rekey: bool) -> Result<Self, Error> {
-        match self {
-            Self::WebCrypto(_) if rekey => Err(Error::Proof(
-                "webcrypto has no key change: a session ends at its limit".to_owned(),
-            )),
-            Self::WebCrypto(method) => Ok(Self::WebCrypto(method)),
-            Self::Noise(method) => Ok(Self::Noise(method.with_rekey(rekey))),
+    /// [`Error::Proof`] when a setting the identity's method does not have was given.
+    pub fn build(self) -> Result<Proof, Error> {
+        if let Some(reason) = self.refusal {
+            return Err(Error::Proof(reason.to_owned()));
         }
+        Ok(match self.inner {
+            Inner::WebCrypto(builder) => Proof::WebCrypto(builder.build()),
+            Inner::Noise(builder) => Proof::Noise(builder.build()),
+        })
     }
+}
 
-    /// The longest handshake message WebCrypto takes.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Proof`] under Noise, whose handshake messages have fixed lengths and no such setting.
-    pub fn with_max_message(self, bytes: usize) -> Result<Self, Error> {
-        match self {
-            Self::WebCrypto(method) => Ok(Self::WebCrypto(method.with_max_message(bytes))),
-            Self::Noise(_) => Err(Error::Proof(
-                "noise has no handshake message limit: its messages are 32, 96 and 64 bytes"
-                    .to_owned(),
-            )),
+impl Proof {
+    /// A builder for the proof of `identity`'s method, in neither role until
+    /// [`responders`](ProofBuilder::responders) or [`initiators`](ProofBuilder::initiators).
+    pub fn builder(identity: Identity) -> ProofBuilder {
+        let inner = match identity {
+            Identity::WebCrypto(identity) => {
+                Inner::WebCrypto(webcrypto::WebCrypto::builder(identity))
+            }
+            Identity::Noise(identity) => Inner::Noise(noise::Noise::builder(identity)),
+        };
+        ProofBuilder {
+            inner,
+            refusal: None,
         }
     }
 
@@ -1057,8 +1090,14 @@ mod tests {
         let dialer = Identity::generate(method).unwrap();
         let answerer = Identity::generate(method).unwrap();
         let (dialer_id, answerer_id) = (dialer.peer_id(), answerer.peer_id());
-        let dialing = Proof::new(dialer).with_responders(Trust::pinned([answerer_id]));
-        let answering = Proof::new(answerer).with_initiators(Trust::pinned([dialer_id]));
+        let dialing = Proof::builder(dialer)
+            .responders(Trust::pinned([answerer_id]))
+            .build()
+            .unwrap();
+        let answering = Proof::builder(answerer)
+            .initiators(Trust::pinned([dialer_id]))
+            .build()
+            .unwrap();
         let (ours, theirs) = wires();
         thread::scope(|scope| {
             let answer =
@@ -1170,8 +1209,14 @@ mod tests {
         let dialer = Identity::generate(dialing).unwrap();
         let answerer = Identity::generate(answering).unwrap();
         let (dialer_id, answerer_id) = (dialer.peer_id(), answerer.peer_id());
-        let dialing = Proof::new(dialer).with_responders(Trust::pinned([answerer_id]));
-        let answering = Proof::new(answerer).with_initiators(Trust::pinned([dialer_id]));
+        let dialing = Proof::builder(dialer)
+            .responders(Trust::pinned([answerer_id]))
+            .build()
+            .unwrap();
+        let answering = Proof::builder(answerer)
+            .initiators(Trust::pinned([dialer_id]))
+            .build()
+            .unwrap();
         let (ours, theirs) = wires();
         thread::scope(|scope| {
             let answer = scope.spawn(move || {
@@ -1285,22 +1330,34 @@ mod tests {
     #[test]
     fn settings_are_each_methods_and_non_defaults_show() {
         for method in Method::ALL {
-            let proof = Proof::new(Identity::generate(method).unwrap());
-            assert!(proof.non_defaults().is_empty(), "{method}");
+            let proof = || Proof::builder(Identity::generate(method).unwrap());
             assert!(
-                !proof
-                    .clone()
-                    .with_key_limit(u64::MAX)
+                proof().build().unwrap().non_defaults().is_empty(),
+                "{method}"
+            );
+            assert!(
+                !proof()
+                    .key_limit(u64::MAX)
+                    .build()
+                    .unwrap()
                     .non_defaults()
                     .is_empty(),
                 "{method}"
             );
-            assert!(proof.with_rekey(false).unwrap().non_defaults().len() <= 1);
+            assert!(
+                proof()
+                    .rekey(false)
+                    .build()
+                    .map_or(true, |proof| proof.non_defaults().len() <= 1)
+            );
         }
-        let webcrypto = Proof::new(Identity::generate(Method::WebCrypto).unwrap());
-        assert!(matches!(webcrypto.with_rekey(true), Err(Error::Proof(_))));
-        let noise = Proof::new(Identity::generate(Method::Noise).unwrap());
-        assert_eq!(noise.with_rekey(false).unwrap().non_defaults().len(), 1);
+        let webcrypto = Proof::builder(Identity::generate(Method::WebCrypto).unwrap());
+        assert!(matches!(
+            webcrypto.rekey(true).build(),
+            Err(Error::Proof(_))
+        ));
+        let noise = Proof::builder(Identity::generate(Method::Noise).unwrap());
+        assert_eq!(noise.rekey(false).build().unwrap().non_defaults().len(), 1);
     }
 
     #[test]
@@ -1310,10 +1367,15 @@ mod tests {
         let answerer = Identity::generate(Method::Noise).unwrap();
         let (dialer_id, answerer_id) = (dialer.peer_id(), answerer.peer_id());
         // A sender changing keys every MiB puts a key change in front of many parts of one record.
-        let dialing = Proof::new(dialer)
-            .with_key_limit(1 << 20)
-            .with_responders(Trust::pinned([answerer_id]));
-        let answering = Proof::new(answerer).with_initiators(Trust::pinned([dialer_id]));
+        let dialing = Proof::builder(dialer)
+            .key_limit(1 << 20)
+            .responders(Trust::pinned([answerer_id]))
+            .build()
+            .unwrap();
+        let answering = Proof::builder(answerer)
+            .initiators(Trust::pinned([dialer_id]))
+            .build()
+            .unwrap();
         let (ours, theirs) = wires();
         let ours = thread::scope(|scope| {
             let answer = scope.spawn(|| prove(&answering, &theirs, LIMIT, 1 << 20).unwrap());
@@ -1354,9 +1416,12 @@ mod tests {
 
     #[test]
     fn a_handshake_limit_noise_cannot_apply_is_refused() {
-        let noise = Proof::new(Identity::generate(Method::Noise).unwrap());
-        assert!(matches!(noise.with_max_message(4096), Err(Error::Proof(_))));
-        let webcrypto = Proof::new(Identity::generate(Method::WebCrypto).unwrap());
-        assert!(webcrypto.with_max_message(4096).is_ok());
+        let noise = Proof::builder(Identity::generate(Method::Noise).unwrap());
+        assert!(matches!(
+            noise.max_message(4096).build(),
+            Err(Error::Proof(_))
+        ));
+        let webcrypto = Proof::builder(Identity::generate(Method::WebCrypto).unwrap());
+        assert!(webcrypto.max_message(4096).build().is_ok());
     }
 }
