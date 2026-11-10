@@ -15,10 +15,11 @@ exclude = [".*", "*.local.*"]
 publish = false
 
 [dependencies]
-coqui-peer = { git = "https://github.com/Boriken-Dev/coqui-peer", rev = "381e2a8144a228e592dc7d82eeb7db85885422ec" }
-coqui-peer-webcrypto = { git = "https://github.com/Boriken-Dev/coqui-peer-webcrypto", rev = "95ee8d4a6d4ed461bd53021c92972e79bf10a864", features = ["pin"] }
+coqui-peer = { git = "https://github.com/Boriken-Dev/coqui-peer", rev = "984db3d54b73de10c7892b06fe269a259de2d1c5" }
+coqui-builder = { git = "https://github.com/Boriken-Dev/coqui-builder", rev = "c1875f8276bd6366c38e9133fdb1181a0ffbaaad" }
+coqui-peer-webcrypto = { git = "https://github.com/Boriken-Dev/coqui-peer-webcrypto", rev = "9146f55dd9fb9be8d6d96f43e17bc7a057ba0681", features = ["pin"] }
 # The Noise method, with `pin` for PIN pairing inside its session.
-coqui-peer-noise = { git = "https://github.com/Boriken-Dev/coqui-peer-noise", rev = "6fd5137ef13d908581f6d1c9b0ca6b1bc19e3df3", features = ["pin"] }
+coqui-peer-noise = { git = "https://github.com/Boriken-Dev/coqui-peer-noise", rev = "3a5b30689780a6e6291af565ff6abbaae515973c", features = ["pin"] }
 coqui-web-channel = { git = "https://github.com/Boriken-Dev/coqui-web-channel.git", rev = "0b5b05c9af3417f6b13edc0fc7d9c86c02a63eca" }
 # Pure Rust, with no system mDNS service to depend on.
 mdns-sd = "0.21"

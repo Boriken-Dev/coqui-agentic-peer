@@ -195,12 +195,13 @@ fn a_silent_noise_joiner_is_sent_away_within_the_responders_limit() {
     let responded = thread::scope(|scope| {
         let responding =
             scope.spawn(|| pairing::respond(&far, &server, &store, &desk, None, limit));
-        let method = coqui_peer_noise::PairingMethod::builder(match client {
-            Identity::Noise(identity) => identity,
-            _ => unreachable!(),
-        })
-        .build()
-        .unwrap();
+        let method = coqui_peer_noise::PairingMethod::builder()
+            .identity(match client {
+                Identity::Noise(identity) => identity,
+                _ => unreachable!(),
+            })
+            .build()
+            .unwrap();
         let joined = prove_out(&method, &near, SHORT, 4096).unwrap();
         let answered = responding.join().unwrap();
         drop(joined);

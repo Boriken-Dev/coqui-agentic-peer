@@ -98,7 +98,8 @@ pub fn desk() -> Result<PairingDesk, Error> {
     options.device = false;
     // Nobody is at a desk here to enter a PIN the joiner shows, so such a run must not wait for one.
     options.pin_shown = false;
-    PairingDesk::builder(coqui_peer_webcrypto::random())
+    PairingDesk::builder()
+        .random(coqui_peer_webcrypto::random())
         .options(options)
         .build()
         .map_err(failed)
@@ -127,7 +128,10 @@ pub fn respond<C: Channel>(
     };
     match identity {
         Identity::WebCrypto(identity) => {
-            let method = webcrypto::PairingMethod::builder(identity.clone()).build();
+            let method = webcrypto::PairingMethod::builder()
+                .identity(identity.clone())
+                .build()
+                .map_err(failed)?;
             let established = prove(&method, channel, limit, MAX_PROOF_MESSAGE)?;
             established
                 .session
@@ -135,7 +139,8 @@ pub fn respond<C: Channel>(
                 .map_err(failed)
         }
         Identity::Noise(identity) => {
-            let method = noise::PairingMethod::builder(identity.clone())
+            let method = noise::PairingMethod::builder()
+                .identity(identity.clone())
                 .build()
                 .map_err(failed)?;
             let established = prove(&method, channel, limit, MAX_PROOF_MESSAGE)?;
@@ -186,7 +191,10 @@ pub fn join_as<C: Channel>(
     };
     let paired = match identity {
         Identity::WebCrypto(identity) => {
-            let method = webcrypto::PairingMethod::builder(identity.clone()).build();
+            let method = webcrypto::PairingMethod::builder()
+                .identity(identity.clone())
+                .build()
+                .map_err(failed)?;
             let established = prove_out(&method, channel, limit, MAX_PROOF_MESSAGE)?;
             established
                 .session
@@ -196,7 +204,8 @@ pub fn join_as<C: Channel>(
                 .map_err(failed)?
         }
         Identity::Noise(identity) => {
-            let method = noise::PairingMethod::builder(identity.clone())
+            let method = noise::PairingMethod::builder()
+                .identity(identity.clone())
                 .build()
                 .map_err(failed)?;
             let established = prove_out(&method, channel, limit, MAX_PROOF_MESSAGE)?;

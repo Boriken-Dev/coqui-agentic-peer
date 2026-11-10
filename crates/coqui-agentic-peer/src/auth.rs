@@ -12,7 +12,8 @@ use std::path::Path;
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use coqui_peer::{Established, Framing, Handshake, KeyMaterial, NonDefault, PeerId, TrustStore};
+use coqui_builder::NonDefault;
+use coqui_peer::{Established, Framing, Handshake, KeyMaterial, PeerId, TrustStore};
 use coqui_peer_noise as noise;
 use coqui_peer_webcrypto as webcrypto;
 use coqui_web_channel::{Channel, Failure};
@@ -344,14 +345,14 @@ impl From<noise::Noise> for Proof {
 }
 
 /// Builds a [`Proof`]: [`Proof::builder`], the settings by name, then [`build`](Self::build).
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 #[must_use]
 pub struct ProofBuilder {
     inner: Inner,
     refusal: Option<&'static str>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 enum Inner {
     WebCrypto(webcrypto::WebCryptoBuilder),
     Noise(noise::NoiseBuilder),
@@ -423,8 +424,8 @@ impl ProofBuilder {
             return Err(Error::Proof(reason.to_owned()));
         }
         Ok(match self.inner {
-            Inner::WebCrypto(builder) => Proof::WebCrypto(builder.build()),
-            Inner::Noise(builder) => Proof::Noise(builder.build()),
+            Inner::WebCrypto(builder) => Proof::WebCrypto(builder.build().map_err(proof_failed)?),
+            Inner::Noise(builder) => Proof::Noise(builder.build().map_err(proof_failed)?),
         })
     }
 }
@@ -435,9 +436,9 @@ impl Proof {
     pub fn builder(identity: Identity) -> ProofBuilder {
         let inner = match identity {
             Identity::WebCrypto(identity) => {
-                Inner::WebCrypto(webcrypto::WebCrypto::builder(identity))
+                Inner::WebCrypto(webcrypto::WebCrypto::builder().identity(identity))
             }
-            Identity::Noise(identity) => Inner::Noise(noise::Noise::builder(identity)),
+            Identity::Noise(identity) => Inner::Noise(noise::Noise::builder().identity(identity)),
         };
         ProofBuilder {
             inner,
