@@ -9,7 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- **Breaking: a weakened setting is a non-default setting.** `Proof::weakened` is `non_defaults`, returning coqui-peer's
+- **Breaking:** the peer family is on `coqui-builder`. `NonDefault` is `coqui_builder::NonDefault` (the crate takes `coqui-builder` as a dependency), so a setting's `value` and `default` are `Shown` values that print as `bool(false)` or `Duration(5s)` rather than plain text.
+- **Breaking:** `ProofBuilder` is no longer `Clone`; the builders of `coqui-peer-noise` and `coqui-peer-webcrypto` it holds are not, so a caller that cloned one builds again from its inputs.
+- **Breaking: a weakened setting is a non-default setting.** `Proof::weakened` is `non_defaults`, returning coqui-builder's
   `NonDefault { setting, value, default }`; the old method is gone; nothing keeps an alias before a release without a pre-release tag.
 - **Breaking:** `discovery::read_descriptors` returns `Descriptors { candidates, directory }`, where `directory` is a
   `DirectoryCheck` (`Private`, `SharedWithOthers`, `NotChecked`), instead of printing 'descriptors ignored' to standard

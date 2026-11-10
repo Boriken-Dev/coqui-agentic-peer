@@ -2,7 +2,7 @@
 
 Header-file-style reference for the `coqui-agentic-peer` crate, so it can be used without reading the source. It ships inside the package and is self-contained.
 
-No Cargo features. MSRV Rust 1.89. Version `0.0.0-alpha.0`, not published. It depends on `coqui-web-channel`, `coqui-peer`, `coqui-peer-webcrypto` and `coqui-peer-noise` (each with `pin`), `mdns-sd`, `serde_json` and `url`. No `unsafe` code. Public modules: `auth`, `companion`, `discovery`, `forward`, `home`, `link`, `mcp_offer`, `mux`, `pairing`, `peers`.
+No Cargo features. MSRV Rust 1.89. Version `0.0.0-alpha.0`, not published. It depends on `coqui-web-channel`, `coqui-builder`, `coqui-peer`, `coqui-peer-webcrypto` and `coqui-peer-noise` (each with `pin`), `mdns-sd`, `serde_json` and `url`. No `unsafe` code. Public modules: `auth`, `companion`, `discovery`, `forward`, `home`, `link`, `mcp_offer`, `mux`, `pairing`, `peers`.
 
 ## `coqui_agentic_peer::mux`
 
@@ -142,7 +142,7 @@ pub fn create_identity(path: &Path, method: Method) -> Result<PeerId, Error>
 pub enum Trust { Pinned(BTreeSet<PeerId>), Store(TrustStore) }   // Clone; Trust::pinned(ids); non_exhaustive
 pub enum Proof { WebCrypto(WebCrypto), Noise(Noise) }            // Clone, From both; impl coqui_peer::Method: Handshake = ProofHandshake, Output = Session, Error = ProofError
 pub fn Proof::builder(identity: Identity) -> ProofBuilder        // identity's method, neither role yet
-impl ProofBuilder {                                              // Clone, Debug, must_use
+impl ProofBuilder {                                              // Debug, not Clone; must_use
     pub fn responders(self, trust: Trust) -> ProofBuilder          // whom prove_out admits
     pub fn initiators(self, trust: Trust) -> ProofBuilder          // whom prove admits
     pub fn key_limit(self, bytes: u64) -> ProofBuilder             // WebCrypto's session limit, Noise's key limit; 2^38 by default, no floor
@@ -152,7 +152,7 @@ impl ProofBuilder {                                              // Clone, Debug
 }
 pub const fn Proof::method(&self) -> Method
 pub fn Proof::peer_id(&self) -> PeerId
-pub fn Proof::non_defaults(&self) -> Vec<NonDefault>
+pub fn Proof::non_defaults(&self) -> Vec<NonDefault>             // coqui_builder::NonDefault: value and default are Shown (prints `bool(false)`, `Duration(5s)`)
 pub enum Session { WebCrypto(..), Noise(..) }                    // From both; method(), id(), export(label, out)
 pub enum ProofError { WebCrypto(..), Noise(..) }                 // the method's own error
 
