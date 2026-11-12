@@ -17,7 +17,7 @@ use coqui_peer::pair::{Paired, Pairing, PairingDesk, PairingOptions, Pin, PinRol
 use coqui_peer::{MessageTransport, ReadTimeout, TrustStore};
 use coqui_peer_noise as noise;
 use coqui_peer_webcrypto as webcrypto;
-use coqui_web_channel::{Channel, Failure};
+use coqui_transport::{Channel, Failure};
 
 use crate::Error;
 use crate::auth::{Identity, MAX_PROOF_MESSAGE, prove, prove_out};

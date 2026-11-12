@@ -16,7 +16,7 @@ use coqui_builder::NonDefault;
 use coqui_peer::{Established, Framing, Handshake, KeyMaterial, PeerId, TrustStore};
 use coqui_peer_noise as noise;
 use coqui_peer_webcrypto as webcrypto;
-use coqui_web_channel::{Channel, Failure};
+use coqui_transport::{Channel, Failure};
 
 use crate::Error;
 

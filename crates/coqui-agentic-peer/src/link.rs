@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use coqui_web_channel::{Channel, Failure};
+use coqui_transport::{Channel, Failure};
 use serde_json::{Value, json};
 
 use crate::mux::{CloseReason, Incoming, Limits, LinkStream, Mux, Side, Stream};

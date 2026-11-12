@@ -10,7 +10,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
-use coqui_web_channel::{Channel, Failure};
+use coqui_transport::{Channel, Failure};
 
 /// One frame's kind, the first byte of a message on the link.
 const OPEN: u8 = 0;

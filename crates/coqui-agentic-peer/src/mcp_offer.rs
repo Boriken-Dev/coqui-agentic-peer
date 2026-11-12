@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use coqui_web_channel::Failure;
+use coqui_transport::Failure;
 use serde_json::json;
 
 use crate::link::{Accepted, Handler};
@@ -480,7 +480,7 @@ mod tests {
     use std::io::Cursor;
     use std::sync::{Arc, Mutex, mpsc};
 
-    use coqui_web_channel::Channel;
+    use coqui_transport::Channel;
     use serde_json::Value;
 
     use super::*;

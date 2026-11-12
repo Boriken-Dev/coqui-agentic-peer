@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use coqui_web_channel::{Channel, Failure};
+use coqui_transport::{Channel, Failure};
 use socket2::SockRef;
 
 use crate::link::{Accepted, Services};
