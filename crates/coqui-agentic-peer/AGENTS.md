@@ -2,7 +2,7 @@
 
 Header-file-style reference for the `coqui-agentic-peer` crate, so it can be used without reading the source. It ships inside the package and is self-contained.
 
-No Cargo features. MSRV Rust 1.89. Version `0.0.0-alpha.0`, not published. It depends on `coqui-web-channel`, `coqui-builder`, `coqui-peer`, `coqui-peer-webcrypto` and `coqui-peer-noise` (each with `pin`), `mdns-sd`, `serde_json` and `url`. No `unsafe` code. Public modules: `auth`, `companion`, `discovery`, `forward`, `home`, `link`, `mcp_offer`, `mux`, `pairing`, `peers`.
+No Cargo features. MSRV Rust 1.89. Version `0.0.0-alpha.0`, not published. It depends on `coqui-transport` (by revision, no default features; its `Channel` and `Failure` are what every link and stream is generic over), `coqui-builder`, `coqui-peer`, `coqui-peer-webcrypto` and `coqui-peer-noise` (each with `pin`), `mdns-sd`, `serde_json` and `url`. No `unsafe` code. Public modules: `auth`, `companion`, `discovery`, `forward`, `home`, `link`, `mcp_offer`, `mux`, `pairing`, `peers`.
 
 ## `coqui_agentic_peer::mux`
 

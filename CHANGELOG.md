@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Breaking:** the channel crate is `coqui-transport` (`coqui_transport::{Channel, Failure}`), replacing `coqui-web-channel` (pinned at `1283116`, the revision `coqui-peer`'s `coqui-transport` feature and `coqui-transport-web` use, so a program has one `Channel` type). The trait moved unchanged; the WebTransport and WebSocket channels are `coqui-transport-web`'s.
+
 - **Breaking:** the peer family is on `coqui-builder`. `NonDefault` is `coqui_builder::NonDefault` (the crate takes `coqui-builder` as a dependency), so a setting's `value` and `default` are `Shown` values that print as `bool(false)` or `Duration(5s)` rather than plain text.
 - **Breaking:** `ProofBuilder` is no longer `Clone`; the builders of `coqui-peer-noise` and `coqui-peer-webcrypto` it holds are not, so a caller that cloned one builds again from its inputs.
 - **Breaking: a weakened setting is a non-default setting.** `Proof::weakened` is `non_defaults`, returning coqui-builder's
@@ -34,7 +36,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `Advertisement` names `Method::DEFAULT` unless told otherwise.
 - An identity file that cannot be written says why, with the system's error.
 - A responder refusing a peer of the other method answers `Error::OtherMethod`, so a host can say so rather than offer to accept the key.
-- The channel crate is `coqui-web-channel` (`coqui_web_channel::`), renamed from coqui-web, pinned at `0b5b05c`: coqui-web's `3b39c00` under its new name, the revision Guatiao's remote source pins, so a program using both has one `Channel` type.
 - A new identity is Noise's unless a method is named (`Method::DEFAULT`). An existing identity keeps its method: a WebCrypto home stays WebCrypto, and its paired peers keep working, until a person makes a Noise identity (`home::identity(None, Some(Method::Noise))`) and pairs again under it, since a key of one method is never the other's.
 - `auth::read_identity` answers an `auth::Identity` of whichever method the file's key is, and `auth::create_identity` takes the method.
 - `home::identity` takes the method: without one it keeps the identity this user has, and refuses to pick when they have one of each.
